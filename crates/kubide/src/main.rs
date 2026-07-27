@@ -1,0 +1,3184 @@
+//! kubide.
+//!
+//! Splittable pane tree, draggable dividers, keyboard focus movement, a custom
+//! title bar and an acrylic backdrop. A pane holds a terminal, a file explorer,
+//! a text editor, or a notice about a file we refuse to open.
+//!
+//! Shortcuts live in the config, not here; see config.example.toml.
+
+#![windows_subsystem = "windows"]
+
+mod content;
+mod draw;
+mod folders;
+mod metrics;
+mod palette;
+mod pomodoro;
+mod session;
+
+use content::{Content, Explorer};
+use metrics::{TextArea, INSET};
+use palette::{Palette, Target};
+use kb_gfx::Renderer;
+use kb_text::TextEngine;
+use kb_ui::{focus_in_dir, Axis, Dir, DividerRef, Hit, Layout, PaneId, Rect, Tree};
+use kb_win::{Backdrop, Chrome, CursorShape, Handler, Mods, WindowConfig};
+use std::collections::HashMap;
+use std::rc::Rc;
+use std::time::{Duration, Instant};
+use std::path::{Path, PathBuf};
+use windows::core::Result;
+use windows::Win32::Foundation::HWND;
+
+struct Kubide {
+    gfx: Option<Renderer>,
+    text: TextEngine,
+    tree: Tree,
+    focus: PaneId,
+    layout: Layout,
+    area: Rect,
+    /// Dragged divider and the last mouse position.
+    dragging: Option<(DividerRef, f32, f32)>,
+    hover_divider: Option<Axis>,
+    frame_ms: f64,
+    /// What each pane holds. Panes with no entry are empty.
+    content: HashMap<PaneId, Content>,
+    /// Pane whose selection is being dragged.
+    sel_drag: Option<PaneId>,
+    /// Where and when the last click landed, for recognising a double click.
+    last_click: Option<(PaneId, kb_edit::Pos, std::time::Instant)>,
+
+    cfg: kb_cfg::Config,
+    /// Why the config didn't load, shown in the status bar. A config that
+    /// silently does nothing is the worst possible outcome.
+    cfg_problem: Option<String>,
+    cfg_watch: Option<kb_cfg::Watcher>,
+    /// Watches the active theme file, so recolouring it repaints live —
+    /// which is the entire feedback loop of making a theme. The theme's
+    /// name rides in `cfg.theme_name`.
+    theme_watch: Option<kb_cfg::Watcher>,
+    /// Watches the workspace's own `.kubide\config.toml`, when it has one.
+    ws_watch: Option<kb_cfg::Watcher>,
+    hwnd: Option<HWND>,
+
+    git: kb_git::Git,
+    /// Ticks since the last git refresh. `git status` costs real time on a big
+    /// repository, so it runs on a schedule rather than per frame — and off the
+    /// UI thread either way.
+    git_at: Instant,
+    /// Counts up whenever a git poll reports news. Editor gutters re-read
+    /// their diff marks when their own stamp falls behind this one — lazily,
+    /// so a pane nobody draws never runs a diff.
+    git_gen: u64,
+    /// Files the focused pane has shown, most recent first — what Ctrl+Tab
+    /// walks back through. In-memory only: remembering it across runs would
+    /// mean reopening files the machine may no longer have.
+    recent: Vec<PathBuf>,
+    /// The directory kubide was opened on. Explorers root here rather than at
+    /// the process's current directory, which drifts once anything chdirs.
+    root: PathBuf,
+    /// Loaded grammars, shared by every editor pane. Loading them per pane
+    /// would repeat a fair amount of setup for no reason.
+    syntax: Rc<kb_syn::Syntax>,
+    /// Trigger words Tab expands, per file extension. Reloaded with the
+    /// config, so editing a snippet file lands on the next config touch.
+    snippets: kb_cfg::snippets::Snippets,
+    /// The overlay, when one is open. It captures every key while it is.
+    palette: Option<Palette>,
+    /// The folder picker, when it is open. Above the palette in every sense:
+    /// it owns the keyboard and the mouse while it is up.
+    folder_picker: Option<folders::Picker>,
+    /// Where the picker's parts were drawn, for hit-testing clicks. Written
+    /// by drawing, the same arrangement as `palette_rows`.
+    picker_hits: Option<PickerHits>,
+    /// A message for the status bar, e.g. a refused close.
+    notice: Option<String>,
+    /// What the open prompt is collecting an answer for.
+    pending: Option<Pending>,
+    /// The work timer. Always present, shown only when asked for.
+    timer: pomodoro::Pomodoro,
+    /// The last drawn value of the time-varying status segments.
+    status_stamp_last: (u64, u64),
+    /// The status bar's shortcut hints, as drawn: hit box and what pressing
+    /// one runs.
+    corner_chips: Vec<(Rect, kb_cfg::Action)>,
+    /// The settings button in the bottom-left corner, as drawn. `None` until
+    /// the first frame places it.
+    settings_btn: Option<Rect>,
+    /// Whether the cursor is over it, for the hover glow.
+    settings_hover: bool,
+    /// Whether it is held down. The click fires on release, on the button.
+    settings_pressed: bool,
+    /// Where the overlay's rows were last drawn, so clicks can find them.
+    /// Recorded by drawing because that is what decides the geometry.
+    palette_rows: Option<PaletteRows>,
+    /// Where this workspace's layout is remembered, if anywhere.
+    session_path: Option<PathBuf>,
+    /// When the layout was last written.
+    session_at: Instant,
+    /// What the chosen font can draw. Measured, not assumed.
+    glyphs: Glyphs,
+    /// Whether the full shortcut list is showing.
+    ///
+    /// Not in the config, unlike the one-line corner hint: this is something
+    /// you put up while you look at it, not a panel you live with. Twenty-odd
+    /// rows pinned over your code permanently is what made the first version
+    /// of this annoying.
+    help_open: bool,
+    /// A destructive action waiting to be confirmed.
+    ///
+    /// There is no dialog system, and there should not be one for this: the
+    /// requirement is only that unsaved work cannot vanish from one keystroke.
+    /// Pressing the same thing again confirms; anything else cancels.
+    confirm: Option<Confirm>,
+}
+
+/// Which decorative glyphs the current font actually has.
+///
+/// The font is picked from a list of candidates, so what you get depends on
+/// the machine: a PC with no Nerd Font installed lands on Cascadia Code, which
+/// has none of these codepoints and draws a notdef box for every one. A file
+/// tree full of boxes reads as a broken editor, not as a missing font.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Glyphs {
+    /// The best file-tree marker set this font can draw.
+    icons: kb_fs::Icons,
+    /// The Powerline branch symbol. A separate question: Cascadia Code PL and
+    /// friends patch Powerline and nothing else, so one flag would either hide
+    /// a symbol the font has or draw a box for one it hasn't.
+    branch: bool,
+    /// The arrow on the terminal's scrollback badge. Not a Nerd Font glyph —
+    /// U+21E1 is ordinary Unicode — but Consolas, Courier New and Lucida
+    /// Console all lack it, so it has to be asked about like the rest.
+    arrow: bool,
+    /// Box-drawing characters, for the frame around a question. Every font
+    /// Windows ships has them, but the family comes from a list the user
+    /// controls, so it gets measured like everything else.
+    boxes: bool,
+    /// Block elements (█), for the welcome screen's watermark. A different
+    /// Unicode block than the frames, so a different question.
+    blocks: bool,
+}
+
+impl Glyphs {
+    /// Best set first, falling back until something renders.
+    ///
+    /// One representative codepoint per range rather than one per icon: font
+    /// patches come whole ranges at a time, and each question costs a walk of
+    /// the system font collection.
+    fn detect(text: &TextEngine) -> Self {
+        let icons = if text.has_glyph('\u{f07b}') {
+            kb_fs::Icons::Nerd
+        } else if text.has_glyph('\u{25b8}') && text.has_glyph('\u{25be}') {
+            kb_fs::Icons::Shapes
+        } else {
+            kb_fs::Icons::Ascii
+        };
+        Self {
+            icons,
+            branch: text.has_glyph('\u{e0a0}'),
+            arrow: text.has_glyph('\u{21e1}'),
+            boxes: text.has_glyph('\u{2554}'),
+            blocks: text.has_glyph('\u{2588}'),
+        }
+    }
+}
+
+/// A destructive action waiting for the same key again.
+///
+/// Only yes-or-no questions live here. Where there are three ways out — save,
+/// discard, cancel — pressing again can offer two of them at most, and the one
+/// it cannot offer is the one people usually want; those ask through the
+/// overlay instead, as a list that says what each answer does.
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum Confirm {
+    /// Replacing what a pane holds, when that would throw away unsaved work.
+    Replace(PaneId),
+    /// Saving over a file that changed on disk after we opened it.
+    Overwrite(PaneId),
+    /// Removing the selected path. Nothing here goes to a recycle bin.
+    DeletePath,
+    /// Throwing away a file's unstaged changes from the git panel. Carries
+    /// the path so the confirmation can never land on a different row than
+    /// the question was asked about.
+    DiscardFile(PathBuf),
+}
+
+/// The drawn position of the overlay's list.
+#[derive(Clone, Copy)]
+pub struct PaletteRows {
+    pub x: f32,
+    pub width: f32,
+    /// Top of the first row.
+    pub y0: f32,
+    pub line_h: f32,
+    pub count: usize,
+}
+
+/// The drawn geometry of the folder picker, for hit-testing clicks.
+///
+/// Recorded by drawing, like [`PaletteRows`]: the renderer decides where
+/// everything sits, and letting the mouse work it out separately would
+/// drift the moment either changed.
+#[derive(Clone)]
+pub struct PickerHits {
+    /// The whole panel. Clicks inside it that hit nothing do nothing;
+    /// clicks outside it are swallowed too, like the palette's.
+    pub panel: Rect,
+    /// Breadcrumb segments: x range and the directory each one names.
+    pub crumb_y: (f32, f32),
+    pub crumbs: Vec<(f32, f32, PathBuf)>,
+    /// The left rail: top of the first row, then one entry per drawn row —
+    /// `None` for the group labels, which are furniture, not places.
+    pub places_y0: f32,
+    pub places_x: (f32, f32),
+    pub places: Vec<Option<PathBuf>>,
+    /// The folder list: top of the first row and how many rows are drawn.
+    pub list_y0: f32,
+    pub list_x: (f32, f32),
+    pub list_count: usize,
+    pub line_h: f32,
+    /// How many rows fit the list, for translating a wheel turn.
+    pub visible: usize,
+    /// Back, forward, up — the toolbar corner.
+    pub back_btn: Rect,
+    pub fwd_btn: Rect,
+    pub up_btn: Rect,
+    /// "Select folder" and "Cancel".
+    pub open_btn: Rect,
+    pub cancel_btn: Rect,
+}
+
+/// What a text prompt is collecting an answer for.
+enum Pending {
+    NewFile(PathBuf),
+    NewFolder(PathBuf),
+    Rename(PathBuf),
+    ProjectSearch,
+    /// Replace, step one: what to look for.
+    ReplaceWhat,
+    /// Replace, step two, carrying step one's answer.
+    ReplaceWith(String),
+    /// The git panel asked for a commit message.
+    CommitMessage,
+    /// Closing a pane whose editor has unsaved work.
+    CloseUnsaved(PaneId),
+    /// Moving to another workspace with unsaved work on screen, carrying
+    /// where we were going.
+    SwitchUnsaved(PathBuf),
+    /// Quitting with unsaved work anywhere.
+    QuitUnsaved,
+}
+
+/// The answers to "what about the unsaved work", in the order they are listed.
+///
+/// Saving comes first because it is what people usually mean and the list
+/// opens on its first row; discarding is second and spelled out rather than
+/// called "No"; cancelling is last and is also what Escape does.
+const SAVE: usize = 0;
+const DISCARD: usize = 1;
+
+/// How often the layout is written.
+///
+/// Saving only on exit loses it to a crash or a kill, which is exactly when
+/// remembering it is worth something.
+const SESSION_INTERVAL: Duration = Duration::from_secs(30);
+
+/// How often git status is re-read. Often enough to feel live, rare enough to
+/// cost nothing.
+const GIT_INTERVAL: Duration = Duration::from_secs(2);
+
+/// How much unsaved work there is, as a sentence can say it.
+///
+/// One phrase for both questions that ask about it, because they are the same
+/// question — the alternative was two format strings drifting into "with 1
+/// file has unsaved changes", which is what they had both drifted into.
+fn unsaved_phrase(n: usize) -> String {
+    let plural = if n == 1 { "file" } else { "files" };
+    format!("{n} unsaved {plural}")
+}
+
+/// What the command line asked us to open.
+///
+/// `kubide` with no argument opens the project the shell is standing in —
+/// found by walking up, so it works from a crate's own directory or from
+/// `target\release` as well as from the top. Naming a directory is taken
+/// literally: discovery is for when nobody said.
+struct Workspace {
+    dir: PathBuf,
+    /// Set when the argument was a file rather than a directory.
+    file: Option<PathBuf>,
+    /// Whether we know where we are. A named directory and a discovered
+    /// project both count; a bare `kubide` somewhere that is no project at
+    /// all — which is what double-clicking the exe amounts to — does not, and
+    /// gets the welcome screen instead of a file listing of wherever it
+    /// happened to wake up.
+    explicit: bool,
+    /// `kubide workspace`: mark this folder with a `.kubide` before opening
+    /// it, the way `git init` marks a repository.
+    init: bool,
+}
+
+impl Workspace {
+    fn from_args() -> Self {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let Some(arg) = std::env::args_os().nth(1) else {
+            return match kb_fs::find_root(&cwd) {
+                Some(dir) => Self { dir, file: None, explicit: true, init: false },
+                None => Self { dir: cwd, file: None, explicit: false, init: false },
+            };
+        };
+        // The subcommand — unless something in this folder is literally
+        // named "workspace", in which case the path wins: a word can be
+        // reclaimed, a directory cannot.
+        if arg == "workspace" && !cwd.join(&arg).exists() {
+            return Self { dir: cwd, file: None, explicit: true, init: true };
+        }
+        let path = cwd.join(arg);
+        // Canonicalized so the title and the git root agree with each other,
+        // and so `kubide ..` shows a real name instead of "..". De-armoured
+        // straight after: the \\?\ form leaks into every shell we spawn.
+        let path = kb_fs::strip_verbatim(std::fs::canonicalize(&path).unwrap_or(path));
+        if path.is_dir() {
+            return Self { dir: path, file: None, explicit: true, init: false };
+        }
+        // A file names itself, not a workspace. Its folder is where to look
+        // for one: `kubide crates\kb-fs\src\lib.rs` should open the project
+        // beside the file, not a two-entry tree of the directory it sits in.
+        let beside = path.parent().map(Path::to_path_buf).unwrap_or(cwd);
+        Self {
+            dir: kb_fs::find_root(&beside).unwrap_or(beside),
+            file: Some(path),
+            explicit: true,
+            init: false,
+        }
+    }
+}
+
+/// The window title for a workspace root.
+///
+/// The folder name rather than the whole path: this goes in the taskbar and
+/// Alt+Tab, where a path is truncated to uselessness, and the job is only to
+/// tell two windows apart. A drive root has no file name and falls back to
+/// itself, which is already short.
+fn title_for(root: &Path) -> String {
+    let name = root
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| root.display().to_string());
+    format!("{name} — kubide")
+}
+
+impl Kubide {
+    fn new(workspace: &Workspace) -> Result<Self> {
+        let loaded = kb_cfg::load_workspace(&workspace.dir);
+        let (tree, root) = Tree::new();
+        let text = TextEngine::with_fonts(&loaded.config.font.family, loaded.config.font.size)?;
+        let watch = kb_cfg::Watcher::new(&loaded.path);
+        let glyphs = Glyphs::detect(&text);
+        // Said once, at startup, and only when there is no config error to
+        // report instead — that one matters more. Falling back silently means
+        // someone sits looking at an editor that does not match a single
+        // screenshot of it and has no idea the fix is one font away. The first
+        // keypress clears it, so it costs nothing to anyone who meant it.
+        let hint = (glyphs.icons != kb_fs::Icons::Nerd && loaded.problem.is_none())
+            .then(|| "no Nerd Font found — file icons are off; install one from nerdfonts.com".to_string());
+        Ok(Self {
+            glyphs,
+            help_open: false,
+            git: kb_git::Git::discover(&workspace.dir),
+            git_at: Instant::now(),
+            git_gen: 0,
+            recent: Vec::new(),
+            root: workspace.dir.clone(),
+            syntax: Rc::new(kb_syn::Syntax::new()),
+            snippets: kb_cfg::snippets::load(),
+            palette: None,
+            folder_picker: None,
+            picker_hits: None,
+            pending: None,
+            timer: pomodoro::Pomodoro::new(loaded.config.pomodoro),
+            status_stamp_last: (0, 0),
+            corner_chips: Vec::new(),
+            settings_btn: None,
+            settings_hover: false,
+            settings_pressed: false,
+            palette_rows: None,
+            session_path: session::path_for(&workspace.dir),
+            session_at: Instant::now(),
+            notice: hint,
+            confirm: None,
+            gfx: None,
+            text,
+            tree,
+            focus: root,
+            layout: Layout::default(),
+            area: Rect::default(),
+            dragging: None,
+            hover_divider: None,
+            frame_ms: 0.0,
+            content: HashMap::new(),
+            sel_drag: None,
+            last_click: None,
+            cfg: loaded.config,
+            cfg_problem: loaded.problem,
+            cfg_watch: watch,
+            theme_watch: loaded.theme_path.as_deref().and_then(kb_cfg::Watcher::new),
+            ws_watch: loaded.workspace_path.as_deref().and_then(kb_cfg::Watcher::new),
+            hwnd: None,
+        })
+    }
+
+    fn relayout(&mut self, w: f32, h: f32) {
+        let pad = self.cfg.window.padding;
+        let cap = self.cfg.window.caption_height;
+        self.area = Rect::new(pad, cap, (w - pad * 2.0).max(1.0), (h - cap - pad).max(1.0));
+        self.layout = self.tree.compute(self.area);
+    }
+
+    /// Reloads the config and applies only what actually changed.
+    ///
+    /// The point of hot reload is that an edit lands without disturbing what
+    /// you were doing, so a color change must not rebuild font atlases or
+    /// restart a running shell.
+    fn reload_config(&mut self) -> bool {
+        let loaded = kb_cfg::load_workspace(&self.root);
+        self.cfg_problem = loaded.problem;
+        // Re-aimed every reload: a config edit may have renamed the theme,
+        // a workspace switch changes whose .kubide is in charge, and the
+        // watches have to follow the files actually in use.
+        self.theme_watch = loaded.theme_path.as_deref().and_then(kb_cfg::Watcher::new);
+        self.ws_watch = loaded.workspace_path.as_deref().and_then(kb_cfg::Watcher::new);
+        // Snippet files ride along: they have no watcher of their own, and
+        // "touch the config to reload them" is a rule people can hold.
+        self.snippets = kb_cfg::snippets::load();
+        self.apply_config(loaded.config)
+    }
+
+    /// Swaps in a config and applies only what actually changed.
+    ///
+    /// Shared by the file watcher and the settings screen so a value edited on
+    /// screen lands exactly the way the same value edited in the file does.
+    /// Two paths here would mean two answers to "does changing this need a new
+    /// font atlas", and one of them would be wrong.
+    fn apply_config(&mut self, config: kb_cfg::Config) -> bool {
+        let refresh = config.refresh_from(&self.cfg);
+        self.cfg = config;
+
+        if !refresh.any() {
+            // Still redraw: the problem message may have appeared or cleared.
+            return true;
+        }
+
+        if refresh.font {
+            let _ = self.text.set_fonts(&self.cfg.font.family, self.cfg.font.size);
+            // A new family is a new set of codepoints. Keeping the old answer
+            // would draw icons a font hasn't got, or hide ones it has.
+            self.glyphs = Glyphs::detect(&self.text);
+        }
+        if refresh.paint {
+            self.timer.set_config(self.cfg.pomodoro);
+            let colors = self.cfg.theme.terminal;
+            for c in self.content.values_mut() {
+                if let Content::Terminal(t) = c {
+                    t.set_colors(colors);
+                }
+            }
+        }
+        if let Some(hwnd) = self.hwnd {
+            if refresh.window {
+                kb_win::set_backdrop(hwnd, backdrop_of(self.cfg.window.backdrop));
+            }
+            if refresh.layout {
+                kb_win::set_caption_height(hwnd, self.cfg.window.caption_height as i32);
+            }
+        }
+        if refresh.font || refresh.layout {
+            if let Some(gfx) = &self.gfx {
+                let (w, h) = gfx.size();
+                self.relayout(w, h);
+            }
+        }
+        true
+    }
+
+    /// The file name in a pane, for asking about it by name. A question that
+    /// says which file it means is the difference between answering it and
+    /// guessing.
+    fn file_name_in(&self, pane: PaneId) -> String {
+        match self.content.get(&pane) {
+            Some(Content::Editor(e)) => e
+                .buffer
+                .path()
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "This file".into()),
+            _ => "This file".into(),
+        }
+    }
+
+    /// Whether a pane holds an editor with unsaved changes.
+    fn unsaved_in(&self, pane: PaneId) -> bool {
+        matches!(self.content.get(&pane), Some(Content::Editor(e)) if e.buffer.modified())
+    }
+
+    fn unsaved_count(&self) -> usize {
+        self.content
+            .values()
+            .filter(|c| matches!(c, Content::Editor(e) if e.buffer.modified()))
+            .count()
+    }
+
+    /// Shows a warning in the status bar.
+    ///
+    /// One place, not two. Putting it on the pane as well meant reading the
+    /// same sentence twice, and the pane header is short enough that a long
+    /// warning gets pushed against the edge.
+    fn warn(&mut self, message: &str) {
+        self.notice = Some(message.to_string());
+    }
+
+    /// True when quitting is allowed. Asks once if anything is unsaved.
+    fn confirm_quit(&mut self) -> bool {
+        let n = self.unsaved_count();
+        if n == 0 {
+            return true;
+        }
+        self.pending = Some(Pending::QuitUnsaved);
+        self.palette = Some(Palette::ask(
+            "Unsaved Changes",
+            &format!("Quit with {}?", unsaved_phrase(n)),
+            &["Save all", "Discard", "Cancel"],
+        ));
+        false
+    }
+
+    /// Moves the divider that changes the focused pane's size.
+    ///
+    /// Which divider that is depends on where the pane sits: one against the
+    /// window edge has no divider on that side, so the opposite one moves
+    /// instead and the sign flips. That is exactly why the actions are named
+    /// for what happens to the pane — "wider" is true wherever it sits, where
+    /// "move the boundary right" would grow a sidebar and shrink whatever was
+    /// against the right edge.
+    fn resize_pane(&mut self, grow: bool, along: Axis) -> bool {
+        /// One press. Small enough to tune with, big enough to see.
+        const STEP: f32 = 24.0;
+
+        let (trailing, leading) = match along {
+            Axis::Horizontal => (Dir::Right, Dir::Left),
+            Axis::Vertical => (Dir::Down, Dir::Up),
+        };
+        // The trailing edge first. `Tree::drag` grows whatever sits before the
+        // divider, so a divider on that side takes the delta as it comes and
+        // one on the leading side takes it reversed.
+        let found = kb_ui::divider_in_dir(&self.layout, self.focus, trailing)
+            .map(|d| (d, 1.0))
+            .or_else(|| {
+                kb_ui::divider_in_dir(&self.layout, self.focus, leading).map(|d| (d, -1.0))
+            });
+        let Some((divider, sign)) = found else {
+            // A single pane fills the window; there is nothing to move.
+            return false;
+        };
+
+        self.tree.drag(divider, STEP * sign * if grow { 1.0 } else { -1.0 }, self.area);
+        self.layout = self.tree.compute(self.area);
+        true
+    }
+
+    fn move_focus(&mut self, dir: Dir) -> bool {
+        if let Some(p) = focus_in_dir(&self.layout, self.focus, dir) {
+            self.focus = p;
+            return true;
+        }
+        false
+    }
+
+    /// Fits terminals to their pane.
+    ///
+    /// Resizing is expensive and delicate on the ConPTY side (reflow bugs come
+    /// from here), so `Terminal::resize` only does work when the column or row
+    /// count actually changed.
+    fn sync_terms(&mut self) {
+        let (cw, ch) = self.text.cell_size();
+        if cw <= 0.0 || ch <= 0.0 {
+            return;
+        }
+        for (pane, r) in &self.layout.panes {
+            if let Some(Content::Terminal(t)) = self.content.get_mut(pane) {
+                let cols = ((r.w - INSET * 2.0) / cw).floor().max(1.0) as usize;
+                let rows = ((r.h - INSET * 2.0) / ch).floor().max(1.0) as usize;
+                t.resize(cols, rows, cw as u16, ch as u16);
+            }
+        }
+    }
+
+    fn terminal(&self, pane: PaneId) -> Option<&kb_term::Terminal> {
+        self.content.get(&pane).and_then(Content::as_terminal)
+    }
+
+    /// Text geometry of a pane, or `None` if it has no rect yet.
+    fn text_area(&self, pane: PaneId, top: usize) -> Option<TextArea> {
+        let r = self.layout.rect_of(pane)?;
+        let (cw, _) = self.text.cell_size();
+        Some(TextArea::new(r, self.text.line_height(), cw, top))
+    }
+
+    /// How many content rows fit in a pane. Drawing and input have to agree on
+    /// this, or a wheel scroll moves by a different amount than it looks.
+    fn visible_rows(&self, pane: PaneId) -> usize {
+        self.text_area(pane, 0).map(|a| a.visible).unwrap_or(1)
+    }
+
+    /// Screen point to a buffer position in an editor pane.
+    fn editor_pos_at(&self, pane: PaneId, x: f32, y: f32) -> Option<kb_edit::Pos> {
+        let Some(Content::Editor(e)) = self.content.get(&pane) else { return None };
+        let area = self.text_area(pane, e.top)?;
+        let (row, col) = area.cell_at(x, y);
+        // The view may be scrolled sideways, so a column on screen is not a
+        // column in the line.
+        let col = col + e.left;
+        // Clamping happens in the buffer: it knows the line lengths, and a
+        // click past the last line should land on the last line, not nowhere.
+        Some(kb_edit::Pos::new(e.top + row, col))
+    }
+
+    /// Copies the focused pane's selection, optionally removing it.
+    fn copy_from_focus(&mut self, cut: bool) {
+        match self.content.get_mut(&self.focus) {
+            Some(Content::Terminal(t)) => {
+                if let Some(s) = t.selection_text() {
+                    let _ = kb_win::clipboard::set_text(&s);
+                    t.select_clear();
+                }
+            }
+            Some(Content::Editor(e)) => {
+                let Some(s) = e.buffer.selected_text() else { return };
+                // Only remove the text once the clipboard actually took it,
+                // or a failed cut destroys the selection with no copy of it.
+                if kb_win::clipboard::set_text(&s).is_ok() && cut {
+                    e.buffer.insert("");
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Pastes the clipboard into the focused pane.
+    ///
+    /// For a terminal it's wrapped in bracketed paste, so the shell sees pasted
+    /// text as pasted rather than typed. Without it, pasting several lines runs
+    /// each one as a command — which makes pasting a script dangerous.
+    fn paste_into_focus(&mut self) {
+        let Some(text) = kb_win::clipboard::get_text() else { return };
+        match self.content.get_mut(&self.focus) {
+            Some(Content::Terminal(t)) => {
+                t.write(b"\x1b[200~");
+                t.write(text.replace("\r\n", "\r").as_bytes());
+                t.write(b"\x1b[201~");
+            }
+            Some(Content::Editor(e)) => {
+                // Normalize endings: pasting CRLF into an LF buffer would
+                // leave stray carriage returns rendered as garbage.
+                e.buffer.insert(&text.replace("\r\n", "\n").replace('\r', "\n"));
+            }
+            _ => {}
+        }
+    }
+
+    /// Screen coordinate to terminal cell.
+    ///
+    /// Clamped to the bounds so a drag slightly past the edge doesn't drop the
+    /// selection.
+    fn term_cell_at(&self, pane: PaneId, x: f32, y: f32) -> Option<(usize, usize)> {
+        let term = self.terminal(pane)?;
+        let r = self.layout.rect_of(pane)?;
+        let (cw, ch) = self.text.cell_size();
+        if cw <= 0.0 || ch <= 0.0 {
+            return None;
+        }
+        let snap = term.snapshot();
+        let col = (((x - (r.x + INSET)) / cw).floor() as i64).clamp(0, snap.cols as i64 - 1);
+        let row = (((y - (r.y + INSET)) / ch).floor() as i64).clamp(0, snap.rows as i64 - 1);
+        Some((col as usize, row as usize))
+    }
+
+    /// Which explorer row is under the cursor, if any.
+    fn explorer_row_at(&self, pane: PaneId, y: f32) -> Option<usize> {
+        let Some(Content::Explorer(e)) = self.content.get(&pane) else { return None };
+        let r = self.layout.rect_of(pane)?;
+        let lh = self.text.line_height();
+        let y0 = r.y + INSET + lh * 1.6;
+        if y < y0 {
+            return None;
+        }
+        let index = e.top + ((y - y0) / lh).floor() as usize;
+        (index < e.tree.rows().len()).then_some(index)
+    }
+
+    /// Opens a terminal in the focused pane; does nothing if it's taken.
+    fn open_terminal(&mut self) -> bool {
+        // An empty pane takes the shell whole. A full one gets a strip
+        // along the bottom of the work instead — the terminal is an
+        // accessory to the code, not a replacement for it. This used to
+        // refuse outright on a full pane, which read as a dead key.
+        let target = if !self.content.contains_key(&self.focus) {
+            self.focus
+        } else {
+            let base = self.workspace_pane();
+            if !self.content.contains_key(&base) {
+                base
+            } else {
+                // The bottom third, give or take: enough for a build log,
+                // not enough to evict the code above it.
+                match self.tree.split_at(base, Axis::Vertical, 0.68) {
+                    Some(p) => {
+                        self.layout = self.tree.compute(self.area);
+                        p
+                    }
+                    None => return false,
+                }
+            }
+        };
+        let (cw, ch) = self.text.cell_size();
+        let r = self.layout.rect_of(target).unwrap_or(self.area);
+        let opts = kb_term::SpawnOptions {
+            cols: ((r.w - INSET * 2.0) / cw).floor().max(1.0) as usize,
+            rows: ((r.h - INSET * 2.0) / ch).floor().max(1.0) as usize,
+            cell_w: cw as u16,
+            cell_h: ch as u16,
+            shell: self.cfg.terminal.shell.clone(),
+            args: self.cfg.terminal.args.clone(),
+            scrollback: self.cfg.terminal.scrollback,
+            colors: self.cfg.theme.terminal,
+            // The workspace root, not wherever the exe was launched from:
+            // a shell that opens in the wrong project is a trap with a
+            // prompt.
+            cwd: Some(self.root.clone()),
+        };
+        match kb_term::Terminal::spawn(&opts) {
+            Ok(t) => {
+                self.content.insert(target, Content::Terminal(t));
+                self.focus = target;
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Opens the explorer in the focused pane, replacing an existing explorer
+    /// or viewer but never a running terminal — that would kill a shell.
+    fn open_explorer(&mut self) -> bool {
+        if matches!(self.content.get(&self.focus), Some(Content::Terminal(_))) {
+            return false;
+        }
+        let root = self.root.clone();
+        self.content
+            .insert(self.focus, Content::Explorer(Explorer::new(root)));
+        true
+    }
+
+    /// Opens the settings screen in the focused pane.
+    ///
+    /// Never over a terminal, which would kill a shell, and never over unsaved
+    /// work. Pressing it again while it is already open does nothing rather
+    /// than resetting the selection to the top.
+    fn open_settings(&mut self) -> bool {
+        // Never over the explorer: opened from the tree, it goes next door.
+        let target = self.workspace_pane();
+        match self.content.get(&target) {
+            // Already open, so this is someone pressing it again to get out.
+            Some(Content::Settings(_)) => {
+                self.focus = target;
+                return self.close_settings();
+            }
+            Some(Content::Terminal(_)) => return false,
+            _ if self.unsaved_in(target) => {
+                self.warn("unsaved changes there — save first, or use another pane");
+                return false;
+            }
+            _ => {}
+        }
+        // What was here comes with it rather than being dropped: leaving has
+        // to put the file back, not hand over an empty pane.
+        let previous = self.content.remove(&target).map(Box::new);
+        self.content
+            .insert(target, Content::Settings(content::Settings::new(previous)));
+        self.focus = target;
+        true
+    }
+
+    /// The pane where content should land when the focused one is off
+    /// limits.
+    ///
+    /// The explorer is furniture, not a workspace: a file, a panel or a
+    /// settings screen opened while the tree has focus goes next door —
+    /// right, then down, skipping shells — and when there is no next door,
+    /// a new split is made rather than eating the tree. A window that lost
+    /// its navigation to the thing it was navigating to is backwards.
+    fn workspace_pane(&mut self) -> PaneId {
+        if !matches!(self.content.get(&self.focus), Some(Content::Explorer(_))) {
+            return self.focus;
+        }
+        if let Some(p) = focus_in_dir(&self.layout, self.focus, Dir::Right)
+            .or_else(|| focus_in_dir(&self.layout, self.focus, Dir::Down))
+            .filter(|p| !matches!(self.content.get(p), Some(Content::Terminal(_))))
+        {
+            return p;
+        }
+        // The tree is alone, or everything else is a running shell.
+        match self.tree.split(self.focus, Axis::Horizontal) {
+            Some(p) => {
+                self.layout = self.tree.compute(self.area);
+                p
+            }
+            None => self.focus,
+        }
+    }
+
+    /// Opens the git panel, or closes it if it is already up — the same
+    /// in-and-out the settings screen has. Never over the explorer: pressed
+    /// from the tree, the panel opens next door.
+    fn toggle_git_panel(&mut self) {
+        if !self.git.is_repo() {
+            self.warn("not a git repository");
+            return;
+        }
+        let target = self.workspace_pane();
+        match self.content.get(&target) {
+            Some(Content::Git(_)) => {
+                self.focus = target;
+                self.close_git_panel();
+                return;
+            }
+            Some(Content::Terminal(_)) => {
+                self.warn("the git panel will not replace a running shell — use another pane");
+                return;
+            }
+            _ if self.unsaved_in(target) => {
+                self.warn("unsaved changes there — save first, or use another pane");
+                return;
+            }
+            _ => {}
+        }
+        let entries = self.git.entries();
+        let previous = self.content.remove(&target).map(Box::new);
+        self.content
+            .insert(target, Content::Git(content::GitPanel::new(previous, entries)));
+        self.focus = target;
+    }
+
+    /// Leaves the git panel, putting back whatever it covered.
+    fn close_git_panel(&mut self) -> bool {
+        let Some(Content::Git(g)) = self.content.get_mut(&self.focus) else {
+            return false;
+        };
+        match g.take_previous() {
+            Some(previous) => {
+                self.content.insert(self.focus, previous);
+            }
+            None => {
+                self.content.remove(&self.focus);
+            }
+        }
+        true
+    }
+
+    /// Re-reads the file list after anything that could have changed it, and
+    /// nudges the async status along so the tree and the gutters follow.
+    fn refresh_git_panel(&mut self) {
+        let entries = self.git.entries();
+        if let Some(Content::Git(g)) = self.content.get_mut(&self.focus) {
+            g.set_entries(entries);
+        }
+        self.git.refresh();
+    }
+
+    /// Leaves the settings screen, putting back whatever it covered.
+    fn close_settings(&mut self) -> bool {
+        let Some(Content::Settings(s)) = self.content.get_mut(&self.focus) else {
+            return false;
+        };
+        match s.take_previous() {
+            Some(previous) => {
+                self.content.insert(self.focus, previous);
+            }
+            // It opened on an empty pane, so an empty pane is where it goes
+            // back to — with the hints on it saying what to press next.
+            None => {
+                self.content.remove(&self.focus);
+            }
+        }
+        true
+    }
+
+    /// Writes the current config to disk.
+    ///
+    /// Only what differs from the defaults, so the file stays a list of what
+    /// you changed rather than a frozen copy of every colour in the theme.
+    /// The watcher will see the write and reload; that is a no-op, because
+    /// what it reads back is what is already applied.
+    fn save_config(&mut self) {
+        let path = kb_cfg::config_path();
+        let result = kb_cfg::save_named(&self.cfg, self.cfg.theme_name.as_deref(), &path);
+        if let Some(Content::Settings(s)) = self.content.get_mut(&self.focus) {
+            s.status = Some(match &result {
+                Ok(()) => format!("written to {}", path.display()),
+                Err(e) => format!("could not write: {e}"),
+            });
+        }
+        if let Err(e) = result {
+            self.warn(&format!("config: {e}"));
+        }
+    }
+
+    /// The line-comment marker for the focused file's language.
+    ///
+    /// Guessed from the extension, same as highlighting. A wrong marker is
+    /// harmless — it comments with the wrong characters and toggles straight
+    /// back off — where a missing one does nothing at all and reads as broken.
+    fn comment_marker(&self) -> String {
+        let lang = match self.content.get(&self.focus) {
+            Some(Content::Editor(e)) => e.buffer.path().and_then(kb_syn::Lang::of),
+            _ => None,
+        };
+        match lang {
+            Some(kb_syn::Lang::Toml) => "#".into(),
+            // Markdown and JSON have no line comment. `//` is what JSON with
+            // comments uses and what people expect to type.
+            _ => "//".into(),
+        }
+    }
+
+    /// Opens the file finder.
+    ///
+    /// git first, because it already honours .gitignore. Walking the directory
+    /// instead would hand back a `target/` full of build artefacts, and
+    /// reimplementing .gitignore to avoid that is a project of its own.
+    fn open_palette_files(&mut self) {
+        const LIMIT: usize = 20_000;
+        // Stripped against wherever the list actually came from. Git hands
+        // back paths under the repository root, which may sit above the
+        // workspace — started from target\release, every row was wearing
+        // its full absolute path because the strip never matched.
+        let (files, base) = match self.git.list_files().filter(|f| !f.is_empty()) {
+            Some(files) => (files, self.git.root().unwrap_or(&self.root).to_path_buf()),
+            None => (kb_fs::list_files(&self.root, LIMIT), self.root.clone()),
+        };
+        self.palette = Some(Palette::files(files, &base));
+    }
+
+    /// A click while the overlay is open.
+    ///
+    /// Inside a row selects it, and a second click on the row already selected
+    /// takes it — the same rule the file tree uses, so there is one behaviour
+    /// to learn rather than two.
+    fn palette_click(&mut self, x: f32, y: f32) {
+        let Some(rows) = self.palette_rows else { return };
+        let Some(p) = &mut self.palette else { return };
+
+        if x < rows.x || x > rows.x + rows.width || y < rows.y0 {
+            return;
+        }
+        let row = ((y - rows.y0) / rows.line_h).floor() as usize;
+        if row >= rows.count {
+            return;
+        }
+        // The drawn row is an offset into what is on screen, and the list
+        // scrolls, so the match it points at is that far past the top.
+        let index = p.top + row;
+        let already = p.selected == index;
+        p.selected = index;
+        if already {
+            self.palette_accept();
+        }
+    }
+
+    /// Acting on a picker row: a folder is somewhere to go, a file is
+    /// something to open — the dialog being copied does exactly this.
+    fn picker_activate(&mut self) {
+        let Some(p) = &mut self.folder_picker else { return };
+        let Some((row, path)) = p.selected_entry() else { return };
+        if row.is_dir {
+            p.navigate(path);
+            return;
+        }
+        self.folder_picker = None;
+        // The same landing rules as the file finder: never over the
+        // explorer, never over unsaved work.
+        let target = self.workspace_pane();
+        if self.unsaved_in(target) {
+            self.confirm = Some(Confirm::Replace(target));
+            self.warn("unsaved changes there — save first, or close the pane");
+            return;
+        }
+        self.content.insert(target, Content::open_path(&path));
+        self.focus = target;
+    }
+
+    /// Keys while the folder picker is open. Explorer's grammar throughout:
+    /// Enter opens what is selected, Backspace goes back, Alt+Up goes up —
+    /// with Ctrl+Enter kept as the fast "select this folder", answering with
+    /// whatever the footer field is showing.
+    fn picker_key(&mut self, vk: u8, ctrl: bool, alt: bool) -> bool {
+        let Some(p) = &mut self.folder_picker else { return false };
+        match vk {
+            0x1B => self.folder_picker = None,
+            0x0D if ctrl => {
+                let dir = p.chosen();
+                self.folder_picker = None;
+                self.switch_workspace(dir);
+            }
+            // Alt+arrows are Explorer's own navigation set.
+            0x26 if alt => p.up(),
+            0x25 if alt => p.back(),
+            0x27 if alt => p.forward(),
+            // Enter, Tab and Right all open the selection: whichever reflex
+            // arrives — dialog, shell or tree — the box does what was meant.
+            0x0D | 0x09 | 0x27 => self.picker_activate(),
+            0x25 => p.back(),  // left, the browser reflex
+            0x26 => p.move_selection(-1),
+            0x28 => p.move_selection(1),
+            0x24 => p.move_selection(i32::MIN / 2), // home
+            0x23 => p.move_selection(i32::MAX / 2), // end
+            // Backspace un-types the search while there is one; after that
+            // it goes back, which is what it does in Explorer itself.
+            0x08 => {
+                if p.filter.is_empty() {
+                    p.back();
+                } else {
+                    p.backspace();
+                }
+            }
+            // Unhandled, so WM_CHAR still arrives and types into the search.
+            _ => return false,
+        }
+        true
+    }
+
+    /// A click while the folder picker is open.
+    ///
+    /// Rows follow the tree's rule — one click selects, a second on the
+    /// same row opens — and everything else is a button that does what its
+    /// picture says: the arrows navigate, crumbs jump, places jump, the two
+    /// footer buttons answer the dialog.
+    fn picker_click(&mut self, x: f32, y: f32) {
+        let Some(hits) = self.picker_hits.clone() else { return };
+        let Some(p) = &mut self.folder_picker else { return };
+
+        if hits.open_btn.contains(x, y) {
+            let dir = p.chosen();
+            self.folder_picker = None;
+            self.switch_workspace(dir);
+            return;
+        }
+        if hits.cancel_btn.contains(x, y) {
+            self.folder_picker = None;
+            return;
+        }
+        if hits.back_btn.contains(x, y) {
+            p.back();
+            return;
+        }
+        if hits.fwd_btn.contains(x, y) {
+            p.forward();
+            return;
+        }
+        if hits.up_btn.contains(x, y) {
+            p.up();
+            return;
+        }
+        if y >= hits.crumb_y.0 && y < hits.crumb_y.1 {
+            if let Some((.., dir)) = hits
+                .crumbs
+                .iter()
+                .find(|(x0, x1, _)| x >= *x0 && x < *x1)
+            {
+                p.navigate(dir.clone());
+            }
+            return;
+        }
+        if x >= hits.places_x.0 && x < hits.places_x.1 && y >= hits.places_y0 {
+            let row = ((y - hits.places_y0) / hits.line_h).floor() as usize;
+            if let Some(Some(dir)) = hits.places.get(row) {
+                p.navigate(dir.clone());
+            }
+            return;
+        }
+        if x >= hits.list_x.0 && x < hits.list_x.1 && y >= hits.list_y0 {
+            let row = ((y - hits.list_y0) / hits.line_h).floor() as usize;
+            if row < hits.list_count && p.select_visible(row) {
+                self.picker_activate();
+            }
+        }
+        // Anywhere else — inside the panel or off it — is not an answer.
+        // The palette ignores those clicks too; Escape and Cancel both say
+        // "no" unambiguously, a slipped click should not.
+    }
+
+    /// Keys while the overlay is open.
+    fn palette_key(&mut self, vk: u8) -> bool {
+        if !palette::consumes(vk) {
+            // Reported as unhandled so the character this key produces still
+            // arrives. Ownership holds anyway: the action lookup is never
+            // reached while a palette is open, and `on_char` drops control
+            // characters, so an unbound chord does nothing.
+            return false;
+        }
+        match vk {
+            0x1B => {
+                // Escape drops the prompt and whatever it was collecting for,
+                // or the operation would fire on the next unrelated prompt.
+                self.palette = None;
+                self.pending = None;
+            }
+            0x08 => {
+                if let Some(p) = &mut self.palette {
+                    p.backspace();
+                }
+            }
+            0x26 => {
+                if let Some(p) = &mut self.palette {
+                    p.move_selection(-1);
+                }
+            }
+            0x28 => {
+                if let Some(p) = &mut self.palette {
+                    p.move_selection(1);
+                }
+            }
+            // A question lays its answers out side by side, so the arrows that
+            // move between them are the sideways pair. Ignored elsewhere: the
+            // lists run downwards.
+            0x25 | 0x27 => {
+                if let Some(p) = &mut self.palette {
+                    if p.mode == palette::Mode::Choice {
+                        p.move_selection(if vk == 0x25 { -1 } else { 1 });
+                    }
+                }
+            }
+            0x0D => self.palette_accept(),
+            _ => {}
+        }
+        true
+    }
+
+    /// Enter in the overlay.
+    fn palette_accept(&mut self) {
+        let Some(p) = &self.palette else { return };
+        let Some(target) = p.chosen() else {
+            // Nothing to accept — an unparseable line number, or no match.
+            // Leaving the overlay open lets the user fix the query rather than
+            // retyping it from scratch.
+            return;
+        };
+        self.palette = None;
+
+        match target {
+            Target::Path(path) => {
+                // Never over the explorer, and the same protection as the
+                // tree: opening must not discard work.
+                let target = self.workspace_pane();
+                if self.unsaved_in(target) {
+                    self.confirm = Some(Confirm::Replace(target));
+                    self.warn("unsaved changes there — save first, or close the pane");
+                    return;
+                }
+                self.content.insert(target, Content::open_path(&path));
+                self.focus = target;
+            }
+            Target::Text(answer) => self.apply_prompt(answer),
+            Target::Answer(index) => self.apply_answer(index),
+            Target::Location(path, pos) => self.open_at(path, pos),
+            Target::Run(action) => {
+                // Runs through the same path a key press would, so a command
+                // and its shortcut can never drift apart.
+                self.run(action);
+            }
+            Target::Pos(pos) => {
+                if let Some(Content::Editor(e)) = self.content.get_mut(&self.focus) {
+                    e.buffer.move_to(pos, false);
+                    // Centre it: landing on the last visible row means seeing
+                    // no context after what you searched for.
+                    e.top = pos.line.saturating_sub(4);
+                }
+            }
+        }
+    }
+
+    /// A number that changes exactly when the clock or countdown text does.
+    ///
+    /// Minutes for the clock, seconds for the countdown, and zero for either
+    /// when it is switched off — so a hidden segment cannot cause a repaint.
+    fn status_stamp(&self) -> (u64, u64) {
+        let minute = if self.cfg.status.clock {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() / 60)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        let countdown = if self.cfg.status.pomodoro {
+            self.timer.remaining().as_secs()
+        } else {
+            0
+        };
+        (minute, countdown)
+    }
+
+    /// Describes the current layout for saving.
+    fn session(&self) -> session::Session {
+        let panes = self
+            .tree
+            .panes()
+            .into_iter()
+            .map(|id| {
+                let what = match self.content.get(&id) {
+                    Some(Content::Explorer(_)) => session::Pane::Explorer,
+                    Some(Content::Terminal(_)) => session::Pane::Terminal,
+                    Some(Content::Editor(e)) => match e.buffer.path() {
+                        Some(p) => session::Pane::File(
+                            p.to_path_buf(),
+                            e.buffer.cursor.line,
+                            e.buffer.cursor.col,
+                        ),
+                        None => session::Pane::Empty,
+                    },
+                    // A refusal notice is not worth restoring; you would only
+                    // be told again that the file cannot be opened.
+                    _ => session::Pane::Empty,
+                };
+                (id, what)
+            })
+            .collect();
+        session::Session {
+            layout: self.tree.describe(),
+            panes,
+            focus: self.focus,
+        }
+    }
+
+    fn save_session(&self) {
+        // The welcome screen is a doorway, not a layout: remembering it
+        // would seed session files for wherever the exe happened to wake up,
+        // which is exactly the noise it exists to avoid.
+        if self.content.values().any(|c| matches!(c, Content::Welcome(_))) {
+            return;
+        }
+        let Some(path) = &self.session_path else { return };
+        // Best effort. A layout that failed to save is not worth a message.
+        let _ = self.session().save(path, &self.root);
+    }
+
+    /// Rebuilds a saved layout. Returns false when there was nothing usable.
+    fn restore_session(&mut self) -> bool {
+        let Some(path) = self.session_path.clone() else { return false };
+        let Some(saved) = session::Session::load(&path, &self.root) else { return false };
+        // Furniture-only sessions are left where they lie. Every kubide
+        // before the welcome screen saved one for any folder it was so much
+        // as started in, and restoring those hands back a listing of
+        // wherever the exe woke up — the exact thing welcome replaces.
+        if !saved.worth_restoring() {
+            return false;
+        }
+
+        let (tree, panes) = Tree::from_desc(&saved.layout);
+        if panes.len() < 2 {
+            // A single empty pane is not worth restoring over the normal
+            // startup, which at least opens the tree.
+            return false;
+        }
+        self.tree = tree;
+        self.layout = self.tree.compute(self.area);
+        self.content.clear();
+
+        for (id, what) in saved.panes {
+            if !panes.contains(&id) {
+                continue;
+            }
+            match what {
+                session::Pane::Explorer => {
+                    self.content
+                        .insert(id, Content::Explorer(Explorer::new(self.root.clone())));
+                }
+                // Terminals are not restarted. A shell is a live process with
+                // history and a working directory; pretending to bring one
+                // back would be a different shell wearing its clothes.
+                session::Pane::Terminal | session::Pane::Empty => {}
+                session::Pane::File(path, line, col) => {
+                    // Files move and get deleted between runs; a missing one
+                    // leaves an empty pane rather than an error.
+                    if path.is_file() {
+                        let mut content = Content::open_path(&path);
+                        if let Content::Editor(e) = &mut content {
+                            e.buffer.move_to(kb_edit::Pos::new(line, col), false);
+                            e.top = line.saturating_sub(4);
+                        }
+                        self.content.insert(id, content);
+                    }
+                }
+            }
+        }
+
+        self.focus = if panes.contains(&saved.focus) {
+            saved.focus
+        } else {
+            panes[0]
+        };
+        true
+    }
+
+    /// Opens a file and puts the caret on a line, for a search result.
+    fn open_at(&mut self, path: PathBuf, pos: kb_edit::Pos) {
+        // Never over the explorer — a search result landing in the tree's
+        // pane would trade the navigation for one match.
+        let target = self.workspace_pane();
+        let already = matches!(
+            self.content.get(&target),
+            Some(Content::Editor(e)) if e.buffer.path() == Some(path.as_path())
+        );
+        if !already {
+            if self.unsaved_in(target) {
+                self.warn("unsaved changes there — save first, or use another pane");
+                return;
+            }
+            self.content.insert(target, Content::open_path(&path));
+        }
+        if let Some(Content::Editor(e)) = self.content.get_mut(&target) {
+            e.buffer.move_to(pos, false);
+            // Centred, so the match has context above and below it.
+            e.top = pos.line.saturating_sub(4);
+        }
+        self.focus = target;
+    }
+
+    /// Notes which file the focused pane is showing, most recent first.
+    ///
+    /// Polled from the tick rather than hooked into every open: moving focus
+    /// onto a pane is as much "I was in that file" as opening it was, and a
+    /// single observation point cannot miss a case that a scattering of
+    /// hooks would.
+    fn note_recent(&mut self) {
+        let Some(Content::Editor(e)) = self.content.get(&self.focus) else { return };
+        let Some(path) = e.buffer.path() else { return };
+        if self.recent.first().map(PathBuf::as_path) == Some(path) {
+            return;
+        }
+        let path = path.to_path_buf();
+        self.recent.retain(|p| *p != path);
+        self.recent.insert(0, path);
+        // Enough to walk back through, not a history feature.
+        self.recent.truncate(20);
+    }
+
+    /// Ctrl+Tab: the focused pane goes back to the file it showed before.
+    ///
+    /// Skips anything already open in another pane — the same file in two
+    /// editors is two buffers drifting apart, which is worse than staying
+    /// put — and anything deleted since it was noted.
+    fn open_last_file(&mut self) {
+        // Never over the explorer: pressed from the tree, the file goes
+        // next door, same as every other way of opening one.
+        let pane = self.workspace_pane();
+        if self.terminal(pane).is_some() {
+            self.warn("this pane is a terminal — no file to switch back to");
+            return;
+        }
+        let current: Option<PathBuf> = match self.content.get(&pane) {
+            Some(Content::Editor(e)) => e.buffer.path().map(Path::to_path_buf),
+            _ => None,
+        };
+        let elsewhere: Vec<PathBuf> = self
+            .content
+            .iter()
+            .filter(|(p, _)| **p != pane)
+            .filter_map(|(_, c)| match c {
+                Content::Editor(e) => e.buffer.path().map(Path::to_path_buf),
+                _ => None,
+            })
+            .collect();
+        let target = self
+            .recent
+            .iter()
+            .find(|p| {
+                Some(p.as_path()) != current.as_deref() && !elsewhere.contains(p) && p.exists()
+            })
+            .cloned();
+        let Some(path) = target else {
+            self.warn("no earlier file to switch back to");
+            return;
+        };
+        // The same protection every other open has.
+        if self.unsaved_in(pane) {
+            self.warn("unsaved changes there — save first, or close the pane");
+            return;
+        }
+        self.content.insert(pane, Content::open_path(&path));
+        self.focus = pane;
+    }
+
+    /// Replaces every occurrence in the focused editor, as one undo step.
+    ///
+    /// The occurrences come from the same matcher Find uses, so this changes
+    /// exactly the set of places Find would have highlighted — smart-case,
+    /// literal, no surprises between the two features.
+    fn replace_all(&mut self, needle: &str, with: &str) {
+        let chars = needle.chars().count();
+        let ranges: Vec<(kb_edit::Pos, usize)> = match self.content.get(&self.focus) {
+            Some(Content::Editor(e)) => e
+                .buffer
+                .lines()
+                .iter()
+                .enumerate()
+                .flat_map(|(line, text)| {
+                    kb_find::occurrences(needle, text)
+                        .into_iter()
+                        .map(move |col| (kb_edit::Pos::new(line, col), chars))
+                })
+                .collect(),
+            _ => return,
+        };
+        if ranges.is_empty() {
+            self.warn(&format!("no match for '{needle}'"));
+            return;
+        }
+        if let Some(Content::Editor(e)) = self.content.get_mut(&self.focus) {
+            let n = e.buffer.replace_ranges(&ranges, with);
+            e.status = Some(format!(
+                "replaced {n} occurrence{}",
+                if n == 1 { "" } else { "s" }
+            ));
+        }
+    }
+
+    /// The selected path in the focused explorer.
+    fn explorer_selection(&self) -> Option<PathBuf> {
+        let Some(Content::Explorer(e)) = self.content.get(&self.focus) else { return None };
+        Some(e.tree.selected_row()?.path.clone())
+    }
+
+    /// Where a new entry should go: the selected directory, or the parent of
+    /// the selected file. Creating a sibling of what you are looking at is
+    /// what people mean, and it is what every file manager does.
+    fn explorer_target_dir(&self) -> Option<PathBuf> {
+        let Some(Content::Explorer(e)) = self.content.get(&self.focus) else {
+            // Not in the tree: beside the file being edited, or at the
+            // workspace root. Ctrl+N must not require a detour through the
+            // explorer to mean anything.
+            return match self.content.get(&self.focus) {
+                Some(Content::Editor(ed)) => ed
+                    .buffer
+                    .path()
+                    .and_then(Path::parent)
+                    .map(Path::to_path_buf)
+                    .or_else(|| Some(self.root.clone())),
+                _ => Some(self.root.clone()),
+            };
+        };
+        let Some(row) = e.tree.selected_row() else {
+            return Some(e.tree.root().to_path_buf());
+        };
+        Some(if row.is_dir {
+            row.path.clone()
+        } else {
+            row.path.parent().map(Path::to_path_buf).unwrap_or_else(|| e.tree.root().to_path_buf())
+        })
+    }
+
+    /// Moves the workspace to another directory.
+    ///
+    /// The file tree used to move its own root and nothing else, which left
+    /// Ctrl+P, project search, git and the session pointing at the directory
+    /// kubide was started in: Backspace showed `C:\` in the tree while the
+    /// finder still listed the old repository. There is one root, and
+    /// everything keyed to it moves together.
+    fn set_workspace_root(&mut self, root: PathBuf) {
+        if root == self.root {
+            return;
+        }
+        // Written before the path changes: the layout on screen belongs to the
+        // workspace being left, and a moment later there is no way to name it.
+        self.save_session();
+        let previous = std::mem::replace(&mut self.root, root);
+
+        // Rediscovered rather than adjusted. The new root may be a different
+        // repository, a parent holding several, or no repository at all, and
+        // only git can say which. Discovery refreshes, so the clock resets too
+        // or the next tick would immediately run a second status.
+        self.git = kb_git::Git::discover(&self.root);
+        self.git_at = Instant::now();
+        // From here the layout is remembered against the new workspace, and
+        // the layout it had remembered before is overwritten rather than
+        // restored. Deliberate: Backspace is a navigation key, not "open
+        // workspace", and rearranging someone's panes under them because they
+        // stepped up a directory would be far worse than losing a layout they
+        // have not looked at.
+        self.session_path = session::path_for(&self.root);
+        self.session_at = Instant::now();
+
+        // Every explorer follows, not just the focused one. Leaving the others
+        // where they were would put the divergence back, one pane over.
+        let root = self.root.clone();
+        for c in self.content.values_mut() {
+            if let Content::Explorer(e) = c {
+                e.move_root(root.clone(), &previous);
+            }
+        }
+
+        if let Some(hwnd) = self.hwnd {
+            kb_win::set_title(hwnd, &title_for(&self.root));
+        }
+        // Backspace is one key and a directory listing looks much the same on
+        // either side of it, so the move has to be said out loud. Losing the
+        // branch from the status bar is otherwise the only clue.
+        self.warn(&format!("workspace root is now {}", self.root.display()));
+    }
+
+    fn refresh_explorers(&mut self) {
+        for c in self.content.values_mut() {
+            if let Content::Explorer(e) = c {
+                e.tree.refresh();
+            }
+        }
+        self.git.refresh();
+    }
+
+    /// Acts on a choice.
+    ///
+    /// Anything that is not save or discard is a cancel, which includes
+    /// Escape: the palette drops the pending question with it, so an answer
+    /// can never arrive at the wrong operation later.
+    fn apply_answer(&mut self, index: usize) {
+        let Some(op) = self.pending.take() else { return };
+        match op {
+            Pending::CloseUnsaved(pane) => {
+                if index == SAVE {
+                    if let Some(Content::Editor(e)) = self.content.get_mut(&pane) {
+                        e.save();
+                        // A failed save must not close the pane; that is the
+                        // one case where discarding was never asked for.
+                        if e.buffer.modified() {
+                            self.warn("still unsaved — the pane is staying open");
+                            return;
+                        }
+                    }
+                } else if index != DISCARD {
+                    return;
+                }
+                self.close_pane(pane);
+            }
+            Pending::SwitchUnsaved(dir) => {
+                if index == SAVE {
+                    let failed = self.save_every_editor();
+                    // A failed save must not take the workspace down with it:
+                    // the panes holding that work are about to be thrown away.
+                    if failed > 0 {
+                        let plural = if failed == 1 { "file" } else { "files" };
+                        self.warn(&format!("{failed} {plural} would not save — staying put"));
+                        return;
+                    }
+                } else if index != DISCARD {
+                    return;
+                }
+                self.open_workspace(dir);
+            }
+            Pending::QuitUnsaved => {
+                if index == SAVE {
+                    let failed = self.save_every_editor();
+                    if failed > 0 {
+                        let plural = if failed == 1 { "file" } else { "files" };
+                        self.warn(&format!("{failed} {plural} would not save — still here"));
+                        return;
+                    }
+                } else if index != DISCARD {
+                    return;
+                }
+                self.save_session();
+                unsafe { windows::Win32::UI::WindowsAndMessaging::PostQuitMessage(0) }
+            }
+            // The text prompts answer through `apply_prompt`; putting one
+            // back would lose it, so they are dropped here deliberately.
+            _ => {}
+        }
+    }
+
+    /// Saves every modified editor. Returns how many refused.
+    fn save_every_editor(&mut self) -> usize {
+        let mut failed = 0;
+        for content in self.content.values_mut() {
+            if let Content::Editor(e) = content {
+                if e.buffer.modified() {
+                    e.save();
+                    if e.buffer.modified() {
+                        failed += 1;
+                    }
+                }
+            }
+        }
+        failed
+    }
+
+    /// Closes a pane and moves focus somewhere that still exists.
+    ///
+    /// Split out because closing now happens from two places: the key, and the
+    /// answer to what should become of the unsaved work in it.
+    fn close_pane(&mut self, pane: PaneId) {
+        // Found before closing; afterwards the pane is gone and so is the
+        // question of what is next to it.
+        let next = focus_in_dir(&self.layout, pane, Dir::Left)
+            .or_else(|| focus_in_dir(&self.layout, pane, Dir::Right))
+            .or_else(|| focus_in_dir(&self.layout, pane, Dir::Up))
+            .or_else(|| focus_in_dir(&self.layout, pane, Dir::Down));
+        // Dropping the content shuts a PTY down; leaving it would keep a shell
+        // running with no way to reach it.
+        self.content.remove(&pane);
+        if self.tree.close(pane) {
+            if let Some(n) = next {
+                self.focus = n;
+            }
+            self.layout = self.tree.compute(self.area);
+        }
+        // The last pane cannot be removed — there would be nothing left to
+        // draw — so closing it empties it instead. Refusing outright would
+        // mean pressing close twice and watching nothing happen, which reads
+        // as a broken key.
+    }
+
+    /// Acts on a prompt's answer.
+    fn apply_prompt(&mut self, answer: String) {
+        let Some(op) = self.pending.take() else { return };
+        let (result, created) = match op {
+            Pending::ProjectSearch => {
+                // Capped: a search that matches everything should not turn
+                // into a list nobody can scroll.
+                const LIMIT: usize = 500;
+                let hits = self.git.grep(&answer, LIMIT).unwrap_or_default();
+                self.palette = Some(Palette::results(hits, &self.root));
+                return;
+            }
+            Pending::ReplaceWhat => {
+                // Step two rides on step one's answer, and the label carries
+                // it so the box says what it is about to touch. An empty
+                // second answer cancels, like every prompt — replacing with
+                // nothing is the one thing this flow cannot express.
+                self.pending = Some(Pending::ReplaceWith(answer.clone()));
+                self.palette = Some(Palette::prompt(&format!("replace '{answer}' with"), ""));
+                return;
+            }
+            Pending::ReplaceWith(needle) => {
+                self.replace_all(&needle, &answer);
+                return;
+            }
+            Pending::CommitMessage => {
+                let result = self.git.commit(&answer);
+                if let Some(Content::Git(g)) = self.content.get_mut(&self.focus) {
+                    g.status = Some(match &result {
+                        Ok(summary) => summary.clone(),
+                        Err(e) => format!("commit failed: {e}"),
+                    });
+                }
+                self.refresh_git_panel();
+                return;
+            }
+            Pending::NewFile(dir) => {
+                let path = dir.join(&answer);
+                (kb_fs::ops::create_file(&path), Some(path))
+            }
+            Pending::NewFolder(dir) => (kb_fs::ops::create_dir(&dir.join(&answer)), None),
+            Pending::Rename(from) => (kb_fs::ops::rename(&from, &answer).map(|_| ()), None),
+            // Answered by picking a row, not by typing. Reaching here would
+            // mean a choice was left waiting while a text prompt opened, which
+            // cannot happen — but dropping it beats acting on the wrong one.
+            Pending::CloseUnsaved(_) | Pending::QuitUnsaved | Pending::SwitchUnsaved(_) => return,
+        };
+
+        match result {
+            Ok(()) => {
+                self.refresh_explorers();
+                // A new file opens straight away: making one and then having
+                // to find it in the tree is a step nobody wants. The tree
+                // keeps its pane; anyone else gets it where they stand — and
+                // never over a shell or unsaved work.
+                if let Some(path) = created {
+                    let target = self.workspace_pane();
+                    let occupied_by_shell =
+                        matches!(self.content.get(&target), Some(Content::Terminal(_)));
+                    if !occupied_by_shell && !self.unsaved_in(target) {
+                        self.content.insert(target, Content::open_path(&path));
+                        self.focus = target;
+                    }
+                }
+            }
+            Err(e) => self.warn(&e),
+        }
+    }
+
+    /// Shows or hides the file tree.
+    ///
+    /// Hiding closes its pane outright rather than shrinking it to nothing: a
+    /// zero-width pane is still in the layout, still takes divider hit-tests,
+    /// and is impossible to grab again.
+    fn toggle_explorer(&mut self) -> bool {
+        let existing = self
+            .content
+            .iter()
+            .find(|(_, c)| matches!(c, Content::Explorer(_)))
+            .map(|(p, _)| *p);
+
+        if let Some(pane) = existing {
+            // Never leave focus on a pane that no longer exists.
+            let next = focus_in_dir(&self.layout, pane, Dir::Right)
+                .or_else(|| focus_in_dir(&self.layout, pane, Dir::Down))
+                .or_else(|| focus_in_dir(&self.layout, pane, Dir::Left));
+            self.content.remove(&pane);
+            if self.tree.close(pane) {
+                if let Some(n) = next {
+                    self.focus = n;
+                }
+                self.layout = self.tree.compute(self.area);
+            }
+            return true;
+        }
+
+        // Put it on the left, which means splitting the leftmost pane and
+        // handing its content to the new right-hand half.
+        let leftmost = self
+            .layout
+            .panes
+            .iter()
+            .min_by(|(_, a), (_, b)| a.x.total_cmp(&b.x))
+            .map(|(p, _)| *p)
+            .unwrap_or(self.focus);
+
+        let Some(right) = self.tree.split_at(leftmost, Axis::Horizontal, 0.25) else {
+            return false;
+        };
+        if let Some(moved) = self.content.remove(&leftmost) {
+            self.content.insert(right, moved);
+        }
+        self.content
+            .insert(leftmost, Content::Explorer(Explorer::new(self.root.clone())));
+        // Focus follows the content the user was working in, not the tree.
+        self.focus = right;
+        self.layout = self.tree.compute(self.area);
+        true
+    }
+
+    /// Activates the explorer selection: expand a directory, or open a file.
+    ///
+    /// The file opens in the neighbouring pane when there is one, so the tree
+    /// stays visible. That's the whole reason to have a pane tree.
+    fn activate_explorer(&mut self) -> bool {
+        let Some(Content::Explorer(e)) = self.content.get_mut(&self.focus) else {
+            return false;
+        };
+        if e.tree.toggle_selected() {
+            return true;
+        }
+        let Some(row) = e.tree.selected_row() else { return true };
+        let path = row.path.clone();
+
+        // Next door, or a fresh split — never into the tree's own pane,
+        // which used to be the fallback when the tree was alone.
+        let target = self.workspace_pane();
+
+        // Opening a file over unsaved work is the same loss as closing the
+        // pane, and it happens far more easily — one Enter in the tree.
+        if self.unsaved_in(target) && self.confirm != Some(Confirm::Replace(target)) {
+            self.confirm = Some(Confirm::Replace(target));
+            self.warn("unsaved changes in that pane — press Enter again to discard");
+            return true;
+        }
+
+        self.confirm = None;
+        self.notice = None;
+        self.content.insert(target, Content::open_path(&path));
+        self.focus = target;
+        true
+    }
+
+    /// Editor keys: movement and the two deletes. Text itself arrives through
+    /// `on_char`, which has the keyboard layout applied.
+    ///
+    /// Shift extends the selection everywhere, so it is read once here rather
+    /// than repeated in every arm.
+    fn editor_key(&mut self, vk: u8, mods: Mods) -> bool {
+        let visible = self.visible_rows(self.focus);
+        let auto_close = self.cfg.editor.auto_close;
+        let Some(Content::Editor(e)) = self.content.get_mut(&self.focus) else {
+            return false;
+        };
+        let extend = mods.shift;
+        let b = &mut e.buffer;
+        match (vk, mods.ctrl) {
+            (0x25, false) => b.move_left(extend),
+            (0x27, false) => b.move_right(extend),
+            (0x25, true) => b.move_word_left(extend),
+            (0x27, true) => b.move_word_right(extend),
+            (0x26, _) => b.move_vertical(-1, extend),
+            (0x28, _) => b.move_vertical(1, extend),
+            (0x21, _) => b.move_vertical(-(visible as isize), extend),
+            (0x22, _) => b.move_vertical(visible as isize, extend),
+            (0x24, _) => b.move_line_start(extend),
+            (0x23, _) => b.move_line_end(extend),
+            (0x08, _) => {
+                e.status = None;
+                if auto_close {
+                    // A pair dies whole when the caret sits inside it.
+                    b.backspace_pair();
+                } else {
+                    b.backspace();
+                }
+            }
+            (0x2E, _) => {
+                e.status = None;
+                b.delete();
+            }
+            // Tab is handled here rather than in on_char, because Shift+Tab
+            // produces no character at all and would otherwise be unreachable.
+            (0x09, _) => {
+                e.status = None;
+                if extend {
+                    b.dedent(4);
+                } else if b.selection().is_some() {
+                    b.indent(4);
+                } else {
+                    // No selection: Tab is an indent at the caret, not a block
+                    // shift, or pressing it mid-line would move the whole line.
+                    b.insert("    ");
+                }
+            }
+            // Enter comes through on_char, where the layout is applied.
+            _ => return false,
+        }
+        true
+    }
+
+    /// Settings keys. Up and down pick a row, left and right change it.
+    ///
+    /// The change lands immediately rather than on a confirm: turning the
+    /// clock on and having to press something else before seeing it is how you
+    /// end up unsure whether the switch did anything. The file is the separate
+    /// step, because that one is not reversible by pressing the arrow back.
+    fn settings_key(&mut self, vk: u8) -> bool {
+        let visible = self.visible_rows(self.focus);
+        let Some(Content::Settings(s)) = self.content.get_mut(&self.focus) else {
+            return false;
+        };
+        let delta = match vk {
+            0x26 => return step_selection(s, -1),               // up
+            0x28 => return step_selection(s, 1),                // down
+            0x21 => return step_selection(s, -(visible as i32)), // page up
+            0x22 => return step_selection(s, visible as i32),   // page down
+            0x24 => return step_selection(s, i32::MIN / 2),     // home
+            0x23 => return step_selection(s, i32::MAX / 2),     // end
+            0x25 => -1,             // left
+            0x27 | 0x0D | 0x20 => 1, // right, enter, space
+            // Escape leaves. Deferred because putting the old pane back needs
+            // `&mut self` again, which cannot happen while this one is still
+            // borrowed out of the map.
+            0x1B => return self.close_settings(),
+            _ => return false,
+        };
+
+        let setting = s.setting();
+        s.status = None;
+        let mut next = self.cfg.clone();
+        setting.step(&mut next, delta);
+        self.apply_config(next);
+        true
+    }
+
+    /// Welcome screen keys: pick a place, go there. Everything else falls
+    /// through, so the global shortcuts all still work from the doorway.
+    fn welcome_key(&mut self, vk: u8) -> bool {
+        let chosen = {
+            let Some(Content::Welcome(w)) = self.content.get_mut(&self.focus) else {
+                return false;
+            };
+            match vk {
+                0x26 => {
+                    w.move_selection(-1);
+                    return true;
+                }
+                0x28 => {
+                    w.move_selection(1);
+                    return true;
+                }
+                0x24 => {
+                    w.move_selection(i32::MIN / 2);
+                    return true;
+                }
+                0x23 => {
+                    w.move_selection(i32::MAX / 2);
+                    return true;
+                }
+                0x0D => match w.chosen() {
+                    Some(dir) => dir,
+                    None => return true,
+                },
+                _ => return false,
+            }
+        };
+        self.switch_workspace(chosen);
+        true
+    }
+
+    /// Moves to another workspace, asking first if that would cost work.
+    ///
+    /// The one way in, so that every route to another folder — the picker,
+    /// the tree, the welcome screen — behaves the same. Refusing to switch
+    /// while anything is unsaved used to be the answer, which left the person
+    /// to find and save each file themselves; being asked is what a person
+    /// would do.
+    fn switch_workspace(&mut self, dir: PathBuf) {
+        // Canonicalised because a row can be reached by a typed `..\`, and
+        // this path goes on to be the window title, the session's name and
+        // every new shell's working directory. De-armoured straight after,
+        // the same way the command line's is.
+        let dir = kb_fs::strip_verbatim(std::fs::canonicalize(&dir).unwrap_or(dir));
+        if !dir.is_dir() {
+            // Listed a moment ago and gone now, or typed by hand and never
+            // there at all.
+            self.warn(&format!("not a folder: {}", dir.display()));
+            return;
+        }
+        if dir == self.root {
+            return;
+        }
+        let n = self.unsaved_count();
+        if n == 0 {
+            self.open_workspace(dir);
+            return;
+        }
+        let name = dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| dir.display().to_string());
+        self.pending = Some(Pending::SwitchUnsaved(dir));
+        self.palette = Some(Palette::ask(
+            "Unsaved Changes",
+            &format!("Open {name} with {}?", unsaved_phrase(n)),
+            &["Save all", "Discard", "Cancel"],
+        ));
+    }
+
+    /// Moves to another workspace: its remembered layout when it has one,
+    /// the standard tree-beside-work start when it does not.
+    ///
+    /// The caller has already made sure nothing unsaved is on screen. The
+    /// old layout goes entirely — shells included — because half a window
+    /// of one project next to half of another is not a workspace, it is an
+    /// accident waiting for a save.
+    fn open_workspace(&mut self, dir: PathBuf) {
+        self.set_workspace_root(dir);
+        session::note_workspace(&self.root);
+        // The new root may carry its own .kubide overrides — a per-project
+        // theme has to land with the project, not one restart later.
+        self.reload_config();
+        if !self.restore_session() {
+            let (tree, first) = Tree::new();
+            self.tree = tree;
+            self.content.clear();
+            self.focus = first;
+            self.open_explorer();
+            if let Some(right) = self.tree.split_at(self.focus, Axis::Horizontal, 0.25) {
+                self.focus = right;
+            }
+            self.layout = self.tree.compute(self.area);
+        }
+        self.save_session();
+    }
+
+    /// Git panel keys.
+    ///
+    /// Deferred actions, the same shape as the explorer: acting needs
+    /// `&mut self` again — git, the palette, the pane map — which cannot
+    /// happen while the panel is still borrowed out of the map.
+    fn git_key(&mut self, vk: u8, mods: Mods) -> bool {
+        use content::GitView;
+
+        // An unbound Ctrl chord must fall through as unhandled, not land
+        // here as its bare letter — Ctrl+C arriving as C would commit.
+        if mods.ctrl {
+            return false;
+        }
+
+        enum Do {
+            Toggle(kb_git::Entry),
+            Diff(kb_git::Entry),
+            Commit,
+            Log,
+            ShowCommit(kb_git::Commit),
+            Refresh,
+            Close,
+            Discard(kb_git::Entry),
+            Remote(kb_git::RemoteOp),
+        }
+
+        let visible = self.visible_rows(self.focus);
+        // Any key but the second X means the user moved on; a discard
+        // confirmation must not survive to swallow a later press.
+        let pending = self.confirm.take();
+        let act = {
+            let Some(Content::Git(g)) = self.content.get_mut(&self.focus) else {
+                return false;
+            };
+            match vk {
+                0x26 => {
+                    g.move_selection(-1, visible);
+                    return true;
+                }
+                0x28 => {
+                    g.move_selection(1, visible);
+                    return true;
+                }
+                0x21 => {
+                    g.move_selection(-(visible as i32), visible);
+                    return true;
+                }
+                0x22 => {
+                    g.move_selection(visible as i32, visible);
+                    return true;
+                }
+                0x24 => {
+                    g.move_selection(i32::MIN / 2, visible);
+                    return true;
+                }
+                0x23 => {
+                    g.move_selection(i32::MAX / 2, visible);
+                    return true;
+                }
+                // One screen back; off the first screen, out. Left and
+                // backspace walk back too but never close — leaving should
+                // take the deliberate key, not the one held for scrolling
+                // history in some other pane a moment ago.
+                0x1B | 0x25 | 0x08 => {
+                    if g.back() {
+                        return true;
+                    }
+                    if vk == 0x1B {
+                        Do::Close
+                    } else {
+                        return true;
+                    }
+                }
+                // Space: the whole point of the panel.
+                0x20 => match (g.view, g.selected_entry()) {
+                    (GitView::Status, Some(e)) => Do::Toggle(e.clone()),
+                    _ => return true,
+                },
+                0x0D => match g.view {
+                    GitView::Status => match g.selected_entry() {
+                        Some(e) => Do::Diff(e.clone()),
+                        None => return true,
+                    },
+                    GitView::Log => match g.selected_commit() {
+                        Some(c) => Do::ShowCommit(c.clone()),
+                        None => return true,
+                    },
+                    GitView::Diff => return true,
+                },
+                0x43 => Do::Commit,  // c
+                0x4C => Do::Log,     // l
+                0x52 => Do::Refresh, // r
+                // Discard, on the file list only: X elsewhere is nothing.
+                0x58 => match (g.view, g.selected_entry()) {
+                    (GitView::Status, Some(e)) => Do::Discard(e.clone()),
+                    _ => return true,
+                },
+                // P pushes; with shift it pulls, the pairing lazygit taught.
+                0x50 => Do::Remote(if mods.shift {
+                    kb_git::RemoteOp::Pull
+                } else {
+                    kb_git::RemoteOp::Push
+                }),
+                _ => return false,
+            }
+        };
+
+        match act {
+            Do::Toggle(e) => {
+                let result = if e.staged {
+                    self.git.unstage(&e.path)
+                } else {
+                    self.git.stage(&e.path)
+                };
+                let said = match result {
+                    Ok(()) => {
+                        format!("{} {}", if e.staged { "unstaged" } else { "staged" }, e.rel)
+                    }
+                    Err(err) => err,
+                };
+                self.refresh_git_panel();
+                if let Some(Content::Git(g)) = self.content.get_mut(&self.focus) {
+                    g.status = Some(said);
+                }
+            }
+            Do::Diff(e) => {
+                let lines = if e.status == kb_git::Status::Untracked {
+                    // Untracked means git has nothing to compare against: the
+                    // whole file is the change, so it is shown as one.
+                    match std::fs::read_to_string(&e.path) {
+                        Ok(text) => text
+                            .lines()
+                            .map(|l| (kb_git::DiffKind::Add, format!("+{l}")))
+                            .collect(),
+                        Err(err) => vec![(kb_git::DiffKind::Meta, format!("unreadable: {err}"))],
+                    }
+                } else {
+                    self.git.diff_file(&e.path, e.staged)
+                };
+                let title = if e.staged { format!("{} \u{b7} staged", e.rel) } else { e.rel.clone() };
+                if let Some(Content::Git(g)) = self.content.get_mut(&self.focus) {
+                    if lines.is_empty() {
+                        // Binary, or the working tree caught up with the
+                        // index. An empty screen would read as a hang.
+                        g.status = Some(format!("no diff to show for {}", e.rel));
+                    } else {
+                        g.show_diff(title, lines, false);
+                    }
+                }
+            }
+            Do::Commit => {
+                let staged = matches!(
+                    self.content.get(&self.focus),
+                    Some(Content::Git(g)) if g.entries.iter().any(|e| e.staged)
+                );
+                if staged {
+                    self.pending = Some(Pending::CommitMessage);
+                    self.palette = Some(Palette::prompt("commit message", ""));
+                } else if let Some(Content::Git(g)) = self.content.get_mut(&self.focus) {
+                    g.status = Some("nothing staged — Space stages the selected file".into());
+                }
+            }
+            Do::Log => {
+                let commits = self.git.log(200);
+                if let Some(Content::Git(g)) = self.content.get_mut(&self.focus) {
+                    if commits.is_empty() {
+                        g.status = Some("no commits yet".into());
+                    } else {
+                        g.log_selected = g.log_selected.min(commits.len() - 1);
+                        g.commits = commits;
+                        g.view = GitView::Log;
+                    }
+                }
+            }
+            Do::ShowCommit(c) => {
+                let lines = self.git.show(&c.hash);
+                if let Some(Content::Git(g)) = self.content.get_mut(&self.focus) {
+                    g.show_diff(format!("{} \u{b7} {}", c.hash, c.subject), lines, true);
+                }
+            }
+            Do::Refresh => {
+                self.refresh_git_panel();
+                if let Some(Content::Git(g)) = self.content.get_mut(&self.focus) {
+                    g.status = Some("refreshed".into());
+                }
+            }
+            Do::Close => {
+                self.close_git_panel();
+            }
+            Do::Discard(e) => {
+                let said = if e.staged {
+                    "staged — Space unstages it first, then X discards".to_string()
+                } else if e.status == kb_git::Status::Untracked {
+                    // Restore has no "before" for a file git never saw;
+                    // deleting it is the tree's job, with its own confirm.
+                    "untracked — nothing to restore; delete it in the tree".to_string()
+                } else if pending == Some(Confirm::DiscardFile(e.path.clone())) {
+                    let said = match self.git.discard(&e.path) {
+                        Ok(()) => format!("discarded changes to {}", e.rel),
+                        Err(err) => err,
+                    };
+                    self.refresh_git_panel();
+                    said
+                } else {
+                    self.confirm = Some(Confirm::DiscardFile(e.path.clone()));
+                    format!("discard changes to {}? this cannot be undone — X again", e.rel)
+                };
+                if let Some(Content::Git(g)) = self.content.get_mut(&self.focus) {
+                    g.status = Some(said);
+                }
+            }
+            Do::Remote(op) => {
+                // Off the UI thread: a push can sit on the network for
+                // seconds, and the result lands through the tick.
+                let said = match self.git.start_remote(op) {
+                    Ok(name) => format!("{name}ing\u{2026}"),
+                    Err(err) => err,
+                };
+                if let Some(Content::Git(g)) = self.content.get_mut(&self.focus) {
+                    g.status = Some(said);
+                }
+            }
+        }
+        true
+    }
+
+    /// Explorer keys. Returns false for anything it doesn't own, so the normal
+    /// shortcuts still work.
+    fn explorer_key(&mut self, vk: u8) -> bool {
+        let visible = self.visible_rows(self.focus);
+        // Anything but activation means the user moved on, so a pending
+        // confirmation must not survive to swallow a later Enter.
+        if !matches!(vk, 0x0D | 0x27) {
+            self.confirm = None;
+            self.notice = None;
+        }
+        // Deferred: these need `&mut self` again, which can't happen while the
+        // explorer is still borrowed out of the map.
+        let mut activate = false;
+        let mut refresh_git = false;
+        let mut go_up = None;
+        {
+            let Some(Content::Explorer(e)) = self.content.get_mut(&self.focus) else {
+                return false;
+            };
+            match vk {
+                0x26 => e.tree.move_selection(-1), // up
+                0x28 => e.tree.move_selection(1),  // down
+                0x21 => e.tree.move_selection(-(visible as i32)), // page up
+                0x22 => e.tree.move_selection(visible as i32), // page down
+                0x24 => e.tree.select(0),          // home
+                0x23 => e.tree.select(usize::MAX), // end
+                0x25 => e.tree.collapse_or_parent(), // left
+                // Right expands but never collapses: on a directory that is
+                // already open it steps into it rather than closing what you
+                // just opened.
+                0x27 => {
+                    if e.tree.selected_row().is_some_and(|r| r.is_dir && r.open) {
+                        e.tree.move_selection(1);
+                    } else {
+                        activate = true;
+                    }
+                }
+                0x0D => activate = true, // enter
+                0x74 => {
+                    // F5 refreshes both: a file that just changed on disk
+                    // usually changed its git status too.
+                    e.tree.refresh();
+                    refresh_git = true;
+                }
+                0x08 => {
+                    // Backspace moves the whole workspace up a level, not just
+                    // this tree. `None` at a drive root, where the only thing
+                    // above is nothing.
+                    go_up = e.tree.root().parent().map(Path::to_path_buf);
+                }
+                _ => return false,
+            }
+        }
+        if refresh_git {
+            self.git.refresh();
+        }
+        if let Some(parent) = go_up {
+            self.set_workspace_root(parent);
+        }
+        if activate {
+            self.activate_explorer();
+        }
+        true
+    }
+}
+
+impl Handler for Kubide {
+    fn on_create(&mut self, hwnd: HWND) {
+        self.hwnd = Some(hwnd);
+    }
+
+    /// The close button, Alt+F4 and the taskbar all come through here, which is
+    /// why the confirmation cannot live only in the quit shortcut.
+    fn on_close(&mut self) -> bool {
+        let closing = self.confirm_quit();
+        if closing {
+            self.save_session();
+        }
+        closing
+    }
+
+    fn on_paint(&mut self, hwnd: HWND, chrome: &Chrome) {
+        let _ = self.render(hwnd, chrome);
+    }
+
+    fn on_resize(&mut self, width: u32, height: u32) {
+        if let Some(gfx) = &self.gfx {
+            let _ = gfx.resize(width, height);
+        }
+        self.relayout(width as f32, height as f32);
+    }
+
+    /// Text input. WM_CHAR has the keyboard layout applied, which is the only
+    /// way ğ/ş/İ arrive correctly on a Turkish layout.
+    fn on_char(&mut self, c: char) -> bool {
+        if let Some(p) = &mut self.folder_picker {
+            // Control characters are chords, not filter text.
+            if (c as u32) >= 0x20 {
+                p.push(c);
+            }
+            return true;
+        }
+        if let Some(p) = &mut self.palette {
+            // A question has no text box, and letting a stray keystroke reach
+            // the query would filter answers out of a list of three.
+            if p.mode != palette::Mode::Choice && (c as u32) >= 0x20 {
+                p.push(c);
+            }
+            return true;
+        }
+        // Typing means the user moved on from whatever was being confirmed.
+        self.confirm = None;
+        self.notice = None;
+        match self.content.get_mut(&self.focus) {
+            Some(Content::Terminal(t)) => {
+                // Typing clears the selection, like every terminal does.
+                // Leaving it up makes it ambiguous what a copy would take.
+                t.select_clear();
+                // Ctrl+letter arrives here as a control character already
+                // (Ctrl+C = 0x03), so nothing needs encoding. Enter arrives as
+                // \r, which is what the shell expects.
+                let mut buf = [0u8; 4];
+                t.write(c.encode_utf8(&mut buf).as_bytes());
+                true
+            }
+            Some(Content::Editor(e)) => {
+                // Control characters reach here for chords we didn't bind.
+                // Inserting them would put invisible garbage in the file.
+                if (c as u32) < 0x20 && c != '\r' && c != '\t' {
+                    return false;
+                }
+                e.status = None;
+                match c {
+                    '\r' => e.buffer.insert_newline(),
+                    // Snippets first: `print` plus Tab is a question, and
+                    // four spaces is the answer only when nothing matched.
+                    '\t' => {
+                        let trigger = if self.cfg.editor.snippets && e.buffer.selection().is_none()
+                        {
+                            e.buffer.word_before_cursor()
+                        } else {
+                            String::new()
+                        };
+                        let ext = e
+                            .buffer
+                            .path()
+                            .and_then(|p| p.extension())
+                            .and_then(|x| x.to_str())
+                            .map(str::to_lowercase)
+                            .unwrap_or_default();
+                        let body = (!trigger.is_empty())
+                            .then(|| self.snippets.get(&ext, &trigger))
+                            .flatten()
+                            .map(str::to_string);
+                        match body {
+                            Some(body) => {
+                                e.buffer.expand_snippet(trigger.chars().count(), &body)
+                            }
+                            // Spaces, not a tab character: the renderer is a
+                            // cell grid with no tab stops, so a real tab
+                            // would not line up.
+                            None => e.buffer.insert("    "),
+                        }
+                    }
+                    // The pairing lives behind its switch: people who hate
+                    // auto-closing hate it completely.
+                    _ if self.cfg.editor.auto_close => e.buffer.type_char(c),
+                    _ => e.buffer.insert_char(c),
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn on_wheel(&mut self, x: f32, y: f32, lines: i32) -> bool {
+        // The picker owns the wheel while it is up, wherever the cursor is:
+        // it also owns every key and click, and a wheel that scrolls the
+        // editor behind an overlay scrolls something nobody is looking at.
+        if self.folder_picker.is_some() {
+            let visible = self.picker_hits.as_ref().map(|h| h.visible).unwrap_or(10);
+            if let Some(p) = &mut self.folder_picker {
+                p.scroll(lines, visible);
+            }
+            return true;
+        }
+        // The wheel goes to the pane under the cursor, not the focused one —
+        // the mouse already said what it meant.
+        let target = match self.tree.hit(&self.layout, x, y) {
+            Some(Hit::Pane(p)) => p,
+            _ => self.focus,
+        };
+        let visible = self.visible_rows(target);
+        let keys = self.cfg.keys.clone();
+        match self.content.get_mut(&target) {
+            Some(Content::Terminal(t)) => {
+                // On the alternate screen (vim, btop) there is no scrollback,
+                // so arrow keys are the correct translation.
+                if t.in_alt_screen() {
+                    let key: &[u8] = if lines > 0 { b"\x1b[A" } else { b"\x1b[B" };
+                    for _ in 0..lines.abs().min(5) {
+                        t.write(key);
+                    }
+                } else {
+                    t.scroll(lines);
+                }
+                true
+            }
+            Some(Content::Explorer(e)) => {
+                e.scroll(lines, visible);
+                true
+            }
+            Some(Content::Viewer(v)) => {
+                v.scroll(lines, visible);
+                true
+            }
+            Some(Content::Editor(e)) => {
+                e.scroll(lines, visible);
+                true
+            }
+            Some(Content::Settings(s)) => {
+                s.scroll(&keys, lines, visible);
+                true
+            }
+            Some(Content::Git(g)) => {
+                g.scroll(lines, visible);
+                true
+            }
+            // Eight rows at most; there is nothing to scroll to.
+            Some(Content::Welcome(_)) => false,
+            None => false,
+        }
+    }
+
+    fn on_tick(&mut self) -> bool {
+        // The theme file counts as config: recolour, save, see it — that
+        // round trip is the whole point of the themes folder.
+        if self.cfg_watch.as_ref().is_some_and(|w| w.changed())
+            || self.theme_watch.as_ref().is_some_and(|w| w.changed())
+            || self.ws_watch.as_ref().is_some_and(|w| w.changed())
+        {
+            return self.reload_config();
+        }
+
+        // Elapsed time, not a tick count. Windows throttles a background
+        // window's timer hard — counting ticks turned "every two seconds" into
+        // "every few minutes" the moment the window lost focus.
+        if self.session_at.elapsed() >= SESSION_INTERVAL {
+            self.session_at = Instant::now();
+            self.save_session();
+        }
+
+        let mut tree_changed = false;
+        if self.git_at.elapsed() >= GIT_INTERVAL {
+            self.git_at = Instant::now();
+            self.git.refresh();
+            // The tree goes with it. Creating a file in the terminal and not
+            // seeing it appear makes the explorer look stale and untrusted,
+            // and this costs one directory read per open folder. The change
+            // report feeds the redraw below — a refresh that stays silent
+            // leaves the new file invisible until an unrelated repaint.
+            for c in self.content.values_mut() {
+                if let Content::Explorer(e) = c {
+                    tree_changed |= e.tree.refresh();
+                }
+            }
+        }
+        // Only redraws when the status actually changed, so a clean tree costs
+        // nothing between refreshes.
+        let git_changed = self.git.poll();
+        if git_changed {
+            // Editor gutters re-read their diff marks against this stamp the
+            // next time they draw — lazily, so hidden panes never pay.
+            self.git_gen += 1;
+        }
+        // Cheap enough to do every tick: one path comparison, almost always
+        // equal. Watching from here is what lets Ctrl+Tab count a focus
+        // change as "I was in that file" without hooks on every open.
+        self.note_recent();
+
+        // A push or pull that finished while we were drawing frames. The
+        // result goes to every open panel — and to the status bar when the
+        // panel was closed before the network came back.
+        let remote_done = if let Some((name, result)) = self.git.poll_remote() {
+            let said = match result {
+                Ok(line) => format!("{name}: {line}"),
+                Err(err) => format!("{name} failed: {err}"),
+            };
+            let entries = self.git.entries();
+            let mut told = false;
+            for c in self.content.values_mut() {
+                if let Content::Git(g) = c {
+                    g.status = Some(said.clone());
+                    g.set_entries(entries.clone());
+                    told = true;
+                }
+            }
+            if !told {
+                self.warn(&said);
+            }
+            // A pull moved files; the tree colours and gutters follow.
+            self.git.refresh();
+            true
+        } else {
+            false
+        };
+
+        // Redraw for the clock and the countdown only when the text they
+        // produce would actually differ. Treating "enabled" as "changed"
+        // repaints sixty times a second for a display that moves once — which
+        // measured at three percent of a core doing nothing.
+        let stamp = self.status_stamp();
+        let ticking = self.timer.poll() || stamp != self.status_stamp_last;
+        self.status_stamp_last = stamp;
+
+        // Terminal output arrives on its own schedule; draw only on change so
+        // an idle kubide never touches the GPU.
+        let dirty = self
+            .content
+            .values()
+            .filter_map(Content::as_terminal)
+            .any(|t| t.take_dirty());
+        dirty || git_changed || ticking || remote_done || tree_changed
+    }
+
+    fn on_mouse_move(&mut self, x: f32, y: f32) -> bool {
+        if let Some((d, lx, ly)) = self.dragging {
+            let axis = self
+                .layout
+                .dividers
+                .iter()
+                .find(|(dd, _, _)| *dd == d)
+                .map(|(_, a, _)| *a);
+            let delta = match axis {
+                Some(Axis::Horizontal) => x - lx,
+                _ => y - ly,
+            };
+            self.tree.drag(d, delta, self.area);
+            self.layout = self.tree.compute(self.area);
+            self.dragging = Some((d, x, y));
+            return true;
+        }
+
+        if let Some(pane) = self.sel_drag {
+            if let (Some((c, r)), Some(t)) = (self.term_cell_at(pane, x, y), self.terminal(pane)) {
+                t.select_update(c, r);
+                return true;
+            }
+            if let Some(pos) = self.editor_pos_at(pane, x, y) {
+                if let Some(Content::Editor(e)) = self.content.get_mut(&pane) {
+                    // `extend` keeps the anchor, which is what makes a drag a
+                    // selection rather than a series of cursor jumps.
+                    e.buffer.move_to(pos, true);
+                }
+                return true;
+            }
+        }
+
+        let prev = self.hover_divider;
+        self.hover_divider = match self.tree.hit(&self.layout, x, y) {
+            Some(Hit::Divider(_, axis)) => Some(axis),
+            _ => None,
+        };
+
+        // The settings button lights up under the cursor — the one visual
+        // promise a clickable thing makes. Redrawn only on the crossing.
+        let hover = self.settings_btn.is_some_and(|r| r.contains(x, y));
+        let crossed = hover != self.settings_hover;
+        self.settings_hover = hover;
+
+        prev != self.hover_divider || crossed
+    }
+
+    fn on_mouse_down(&mut self, x: f32, y: f32) -> bool {
+        // While an overlay is up it owns the mouse too. Without this the
+        // click lands on a pane underneath and moves focus behind a list the
+        // user is still looking at.
+        if self.folder_picker.is_some() {
+            self.picker_click(x, y);
+            return false;
+        }
+        if self.palette.is_some() {
+            self.palette_click(x, y);
+            return false;
+        }
+        // The settings button presses like a button: down marks it, and the
+        // action fires on release, only if the cursor is still on it — the
+        // way every button since the first one has let go of a mis-click.
+        if self.settings_btn.is_some_and(|r| r.contains(x, y)) {
+            self.settings_pressed = true;
+            return true; // capture, so the release comes back here
+        }
+        // The corner chips sit over the panes, so they are asked first.
+        if let Some(action) = self
+            .corner_chips
+            .iter()
+            .find(|(r, _)| r.contains(x, y))
+            .map(|(_, a)| *a)
+        {
+            self.run(action);
+            return false;
+        }
+        match self.tree.hit(&self.layout, x, y) {
+            Some(Hit::Divider(d, _)) => {
+                self.dragging = Some((d, x, y));
+                true // capture the mouse
+            }
+            Some(Hit::Pane(p)) => {
+                self.focus = p;
+                if let Some(row) = self.explorer_row_at(p, y) {
+                    if let Some(Content::Explorer(e)) = self.content.get_mut(&p) {
+                        let already = e.tree.selected() == row;
+                        e.tree.select(row);
+                        // Click selects; clicking the selected row activates.
+                        // Double-click would need timing state for the same
+                        // result, and this stays predictable.
+                        if already {
+                            self.activate_explorer();
+                        }
+                    }
+                    return false;
+                }
+                if let (Some(t), Some((c, r))) = (self.terminal(p), self.term_cell_at(p, x, y)) {
+                    t.select_start(c, r);
+                    self.sel_drag = Some(p);
+                    // Capture, or a drag past the pane edge breaks.
+                    return true;
+                }
+                if let Some(pos) = self.editor_pos_at(p, x, y) {
+                    // A second click in the same spot takes the word. The
+                    // interval comes from Windows: it is a user setting, and
+                    // inventing our own number would quietly ignore it.
+                    let again = self.last_click.is_some_and(|(lp, lpos, at)| {
+                        lp == p
+                            && lpos == pos
+                            && at.elapsed().as_millis() <= kb_win::double_click_ms() as u128
+                    });
+                    if let Some(Content::Editor(e)) = self.content.get_mut(&p) {
+                        if again {
+                            e.buffer.select_word_at(pos);
+                        } else {
+                            e.buffer.move_to(pos, false);
+                        }
+                        e.status = None;
+                    }
+                    self.last_click = Some((p, pos, std::time::Instant::now()));
+                    self.sel_drag = Some(p);
+                    return true;
+                }
+                false
+            }
+            None => false,
+        }
+    }
+
+    /// The Windows console behaviour: copy and clear if there's a selection,
+    /// otherwise paste. Two jobs on one button, but never ambiguous — the
+    /// presence of a selection says which one was meant.
+    fn on_right_click(&mut self, x: f32, y: f32) -> bool {
+        let pane = match self.tree.hit(&self.layout, x, y) {
+            Some(Hit::Pane(p)) => p,
+            _ => return false,
+        };
+        self.focus = pane;
+        let Some(t) = self.terminal(pane) else { return false };
+
+        match t.selection_text() {
+            Some(s) => {
+                let _ = kb_win::clipboard::set_text(&s);
+                t.select_clear();
+            }
+            None => self.paste_into_focus(),
+        }
+        true
+    }
+
+    fn on_mouse_up(&mut self, x: f32, y: f32) -> bool {
+        if self.settings_pressed {
+            self.settings_pressed = false;
+            if self.settings_btn.is_some_and(|r| r.contains(x, y)) {
+                self.open_settings();
+            }
+            return true;
+        }
+        // The selection survives the release — it's about to be copied.
+        self.sel_drag = None;
+        self.dragging.take().is_some()
+    }
+
+    fn cursor(&self) -> CursorShape {
+        let axis = self.dragging.map(|(d, _, _)| {
+            self.layout
+                .dividers
+                .iter()
+                .find(|(dd, _, _)| *dd == d)
+                .map(|(_, a, _)| *a)
+                .unwrap_or(Axis::Horizontal)
+        });
+        match axis.or(self.hover_divider) {
+            Some(Axis::Horizontal) => CursorShape::SizeWE,
+            Some(Axis::Vertical) => CursorShape::SizeNS,
+            None => CursorShape::Arrow,
+        }
+    }
+
+    fn on_key(&mut self, vk: u8, mods: Mods) -> bool {
+        // The overlays take every key while one is open. Anything less lets
+        // a stray keystroke through to the editor underneath, which is how a
+        // find box ends up typing into the file it was searching.
+        if self.folder_picker.is_some() {
+            return self.picker_key(vk, mods.ctrl, mods.alt);
+        }
+        if self.palette.is_some() {
+            return self.palette_key(vk);
+        }
+        // Bound actions win over pane content. That ordering is the whole
+        // reason shortcuts kept breaking before: a terminal that swallows every
+        // key makes anything checked after it dead code.
+        if let Some(action) = self.cfg.keys.lookup(vk, mods.ctrl, mods.shift, mods.alt) {
+            // Scoped actions step aside rather than claiming a key from
+            // whatever has focus. Editor actions give way to a terminal —
+            // Ctrl+A, Ctrl+Z and Ctrl+X are control characters a shell needs —
+            // and explorer actions only fire on the tree, so the editor keeps
+            // its Delete key.
+            let applies = match action.scope() {
+                kb_cfg::Scope::Global => true,
+                kb_cfg::Scope::Editor => self.terminal(self.focus).is_none(),
+                kb_cfg::Scope::Explorer => {
+                    matches!(self.content.get(&self.focus), Some(Content::Explorer(_)))
+                }
+            };
+            if applies {
+                return self.run(action);
+            }
+        }
+
+        // Keys the pane content owns. Alt is excluded so focus movement can't
+        // be swallowed by whatever is focused.
+        if mods.alt {
+            return false;
+        }
+        if self.settings_key(vk) {
+            return true;
+        }
+        if self.welcome_key(vk) {
+            return true;
+        }
+        if self.git_key(vk, mods) {
+            return true;
+        }
+        if self.explorer_key(vk) {
+            return true;
+        }
+        if self.editor_key(vk, mods) {
+            return true;
+        }
+        if let Some(t) = self.terminal(self.focus) {
+            if let Some(bytes) = Self::term_key_bytes(vk, mods.ctrl) {
+                t.write(bytes);
+                return true;
+            }
+            return false;
+        }
+        let visible = self.visible_rows(self.focus);
+        let step = match vk {
+            0x26 => 3,                 // up
+            0x28 => -3,                // down
+            0x21 => visible as i32,    // page up
+            0x22 => -(visible as i32), // page down
+            _ => return false,
+        };
+        if let Some(Content::Viewer(v)) = self.content.get_mut(&self.focus) {
+            v.scroll(step, visible);
+            return true;
+        }
+        false
+    }
+}
+
+impl Kubide {
+    /// Runs a bound action.
+    ///
+    /// Always returns `true`, even when the action couldn't do anything: the
+    /// key was handled by US, so its WM_CHAR must be swallowed. Returning
+    /// `false` from a failed copy would send 0x03 — SIGINT — to the shell,
+    /// which is the worst kind of silent bug.
+    fn run(&mut self, action: kb_cfg::Action) -> bool {
+        use kb_cfg::Action::*;
+        // Taken up front: doing anything else means the user moved on, and a
+        // confirmation that survives an unrelated action is a trap.
+        let pending = self.confirm.take();
+        self.notice = None;
+        match action {
+            SplitRight | SplitDown => {
+                let axis = if action == SplitRight { Axis::Horizontal } else { Axis::Vertical };
+                if let Some(p) = self.tree.split(self.focus, axis) {
+                    self.focus = p;
+                }
+                self.layout = self.tree.compute(self.area);
+            }
+            ClosePane => {
+                // Unsaved work must not disappear from one keystroke. Asked as
+                // a list rather than a press-again, because there are three
+                // ways out of this and a press-again can only offer two.
+                if self.unsaved_in(self.focus) {
+                    let name = self.file_name_in(self.focus);
+                    self.pending = Some(Pending::CloseUnsaved(self.focus));
+                    self.palette = Some(Palette::ask(
+                        "Unsaved Changes",
+                        &format!("Close {name} without saving it?"),
+                        &["Save", "Discard", "Cancel"],
+                    ));
+                    return true;
+                }
+                self.close_pane(self.focus);
+            }
+            OpenTerminal => {
+                self.open_terminal();
+            }
+            OpenExplorer => {
+                self.open_explorer();
+            }
+            ToggleExplorer => {
+                self.toggle_explorer();
+            }
+            OpenSettings => {
+                self.open_settings();
+            }
+            GitPanel => self.toggle_git_panel(),
+            WorkspaceHere => {
+                let Some(path) = self.explorer_selection() else { return true };
+                // A file means its folder: "make the project this thing's
+                // home" is what pressing this on a file can only mean.
+                let dir = if path.is_dir() {
+                    path
+                } else {
+                    match path.parent() {
+                        Some(p) => p.to_path_buf(),
+                        None => return true,
+                    }
+                };
+                self.switch_workspace(dir);
+            }
+            OpenFolder => {
+                // Opened on the current root: the next project is usually a
+                // sibling, one Left away. The palette drops so two overlays
+                // never fight over the keyboard.
+                self.palette = None;
+                self.pending = None;
+                self.folder_picker = Some(folders::Picker::new(
+                    &self.root,
+                    session::recent_workspaces(),
+                    kb_win::quick_access(),
+                ));
+            }
+            ToggleHelp => self.help_open = !self.help_open,
+            NewFile | NewFolder => {
+                let Some(dir) = self.explorer_target_dir() else { return true };
+                self.pending = Some(if action == NewFile {
+                    Pending::NewFile(dir)
+                } else {
+                    Pending::NewFolder(dir)
+                });
+                let label = if action == NewFile { "new file" } else { "new folder" };
+                self.palette = Some(Palette::prompt(label, ""));
+            }
+            Rename => {
+                let Some(path) = self.explorer_selection() else { return true };
+                let old = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                self.pending = Some(Pending::Rename(path));
+                // Prefilled: renaming usually means changing part of a name.
+                self.palette = Some(Palette::prompt("rename", &old));
+            }
+            Delete => {
+                let Some(path) = self.explorer_selection() else { return true };
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                // Nothing here goes to a recycle bin, so it gets the same
+                // ask-once treatment as discarding unsaved work.
+                if pending != Some(Confirm::DeletePath) {
+                    self.confirm = Some(Confirm::DeletePath);
+                    self.warn(&format!("delete {name}? press delete again"));
+                    return true;
+                }
+                match kb_fs::ops::delete(&path) {
+                    Ok(()) => self.refresh_explorers(),
+                    Err(e) => self.warn(&e),
+                }
+            }
+            Commands => self.palette = Some(Palette::commands(&self.cfg.keys)),
+            GoToFile => self.open_palette_files(),
+            LastFile => self.open_last_file(),
+            Find => {
+                let lines = match self.content.get(&self.focus) {
+                    Some(Content::Editor(e)) => e.buffer.lines().to_vec(),
+                    _ => return true,
+                };
+                self.palette = Some(Palette::find(&lines));
+            }
+            Replace => {
+                let Some(Content::Editor(e)) = self.content.get(&self.focus) else {
+                    return true;
+                };
+                // Prefilled with the selection when it fits on one line:
+                // replacing the thing you are looking at is the usual case.
+                let initial = e
+                    .buffer
+                    .selected_text()
+                    .filter(|s| !s.contains('\n'))
+                    .unwrap_or_default();
+                self.pending = Some(Pending::ReplaceWhat);
+                self.palette = Some(Palette::prompt("replace", &initial));
+            }
+            GoToLine => self.palette = Some(Palette::line()),
+            FindInProject => {
+                if !self.git.is_repo() {
+                    // Without a repository there is no .gitignore to honour
+                    // and no fast index; saying so beats scanning target/.
+                    self.warn("project search needs a git repository");
+                    return true;
+                }
+                self.pending = Some(Pending::ProjectSearch);
+                self.palette = Some(Palette::prompt("search", ""));
+            }
+            ToggleComment => {
+                let marker = self.comment_marker();
+                if let Some(Content::Editor(e)) = self.content.get_mut(&self.focus) {
+                    e.buffer.toggle_comment(&marker);
+                }
+            }
+            MoveLineUp | MoveLineDown => {
+                let down = action == MoveLineDown;
+                if let Some(Content::Editor(e)) = self.content.get_mut(&self.focus) {
+                    e.buffer.move_lines(down);
+                }
+            }
+            DuplicateLine => {
+                if let Some(Content::Editor(e)) = self.content.get_mut(&self.focus) {
+                    e.buffer.duplicate_lines();
+                }
+            }
+            FocusLeft => {
+                self.move_focus(Dir::Left);
+            }
+            FocusRight => {
+                self.move_focus(Dir::Right);
+            }
+            FocusUp => {
+                self.move_focus(Dir::Up);
+            }
+            FocusDown => {
+                self.move_focus(Dir::Down);
+            }
+            FocusPane1 | FocusPane2 | FocusPane3 | FocusPane4 | FocusPane5 | FocusPane6
+            | FocusPane7 | FocusPane8 | FocusPane9 => {
+                // Counted where they are drawn, not where they are in the
+                // tree: the number has to mean the same pane every time, and
+                // tree order changes when something elsewhere is closed.
+                let order = kb_ui::panes_in_reading_order(&self.layout);
+                if let Some(p) = action.pane_index().and_then(|i| order.get(i)) {
+                    self.focus = *p;
+                }
+                // A number past the end does nothing. Warning about it would
+                // be noise on a key you press by habit.
+            }
+            GrowPaneWidth => {
+                self.resize_pane(true, Axis::Horizontal);
+            }
+            ShrinkPaneWidth => {
+                self.resize_pane(false, Axis::Horizontal);
+            }
+            GrowPaneHeight => {
+                self.resize_pane(true, Axis::Vertical);
+            }
+            ShrinkPaneHeight => {
+                self.resize_pane(false, Axis::Vertical);
+            }
+            MinimizeWindow => {
+                if let Some(hwnd) = self.hwnd {
+                    kb_win::minimize(hwnd);
+                }
+            }
+            ToggleMaximize => {
+                if let Some(hwnd) = self.hwnd {
+                    kb_win::toggle_maximize(hwnd);
+                }
+            }
+            Copy => self.copy_from_focus(false),
+            Cut => self.copy_from_focus(true),
+            Paste => self.paste_into_focus(),
+            Save => {
+                if matches!(self.content.get(&self.focus), Some(Content::Settings(_))) {
+                    self.save_config();
+                    return true;
+                }
+                let stale = matches!(
+                    self.content.get(&self.focus),
+                    Some(Content::Editor(e)) if e.buffer.changed_on_disk()
+                );
+                // Overwriting another program's change cannot be undone — not
+                // by us, and not by whatever wrote it.
+                if stale && pending != Some(Confirm::Overwrite(self.focus)) {
+                    self.confirm = Some(Confirm::Overwrite(self.focus));
+                    self.warn("changed on disk since you opened it — press save again to overwrite");
+                    return true;
+                }
+                if let Some(Content::Editor(e)) = self.content.get_mut(&self.focus) {
+                    e.save();
+                }
+            }
+            Undo => {
+                if let Some(Content::Editor(e)) = self.content.get_mut(&self.focus) {
+                    e.buffer.undo();
+                }
+            }
+            Redo => {
+                if let Some(Content::Editor(e)) = self.content.get_mut(&self.focus) {
+                    e.buffer.redo();
+                }
+            }
+            SelectAll => {
+                if let Some(Content::Editor(e)) = self.content.get_mut(&self.focus) {
+                    e.buffer.select_all();
+                }
+            }
+            PomodoroToggle => self.timer.toggle(),
+            PomodoroReset => self.timer.reset(),
+            PomodoroSkip => self.timer.advance(),
+            FontLarger => {
+                let _ = self.text.set_size(self.text.size() + 1.0);
+            }
+            FontSmaller => {
+                let _ = self.text.set_size(self.text.size() - 1.0);
+            }
+            Quit => {
+                if !self.confirm_quit() {
+                    return true;
+                }
+                self.save_session();
+                unsafe { windows::Win32::UI::WindowsAndMessaging::PostQuitMessage(0) }
+            }
+        }
+        true
+    }
+}
+
+impl Kubide {
+    /// Terminal encoding for special keys. Printable characters come through
+    /// `on_char` with the layout applied, so only keys with an escape sequence
+    /// belong here.
+    fn term_key_bytes(vk: u8, ctrl: bool) -> Option<&'static [u8]> {
+        Some(match vk {
+            // The modern terminal contract, backwards from the labels on
+            // the keys: plain Backspace sends DEL (0x7f) and Ctrl+Backspace
+            // sends BS (0x08). Left on the character path this arrived as
+            // 0x08, which PSReadLine reads as Ctrl+Backspace — and one
+            // press ate the whole word.
+            0x08 if ctrl => b"\x08",
+            0x08 => b"\x7f",
+            0x25 => b"\x1b[D",  // left
+            0x26 => b"\x1b[A",  // up
+            0x27 => b"\x1b[C",  // right
+            0x28 => b"\x1b[B",  // down
+            0x24 => b"\x1b[H",  // home
+            0x23 => b"\x1b[F",  // end
+            0x2E => b"\x1b[3~", // delete
+            0x21 => b"\x1b[5~", // page up
+            0x22 => b"\x1b[6~", // page down
+            _ => return None,
+        })
+    }
+}
+
+/// Moves the settings selection. A free function so the borrow of the pane
+/// ends before the caller needs `&mut self` again.
+fn step_selection(settings: &mut content::Settings, delta: i32) -> bool {
+    settings.move_selection(delta);
+    true
+}
+
+/// Config enum to the platform enum. kb-cfg stays platform-free, so the
+/// mapping lives here rather than in the config crate.
+fn backdrop_of(b: kb_cfg::Backdrop) -> Backdrop {
+    match b {
+        kb_cfg::Backdrop::None => Backdrop::None,
+        kb_cfg::Backdrop::Mica => Backdrop::Mica,
+        kb_cfg::Backdrop::MicaAlt => Backdrop::MicaAlt,
+        kb_cfg::Backdrop::Acrylic => Backdrop::Acrylic,
+    }
+}
+
+fn main() -> Result<()> {
+    // Before the config loads, so a `theme = "gruvbox"` on a fresh machine
+    // finds a real file — and so there is always something in the themes
+    // folder to copy a new theme from.
+    kb_cfg::seed_themes();
+    kb_cfg::snippets::seed_snippets();
+    let workspace = Workspace::from_args();
+    if workspace.init {
+        // `kubide workspace`: the mark goes down before the config loads,
+        // so the new file is read and watched from the very first frame.
+        kb_cfg::seed_workspace(&workspace.dir);
+    }
+    let mut app = Kubide::new(&workspace)?;
+
+    // A named file is an instruction, so it wins over whatever was open last
+    // time. Without one, pick up where the last session left off.
+    let restored = workspace.file.is_none() && app.restore_session();
+    // Nowhere named, nothing remembered, no mark on the folder: this is the
+    // exe double-clicked, or a first `kubide` somewhere new. A file listing
+    // of wherever the process happened to wake up helps nobody; the welcome
+    // screen offers the folder and the places already worked in, and lets
+    // the person say which. A `.kubide` counts as being named — that is
+    // what the mark is for.
+    let welcome =
+        !restored && !workspace.explicit && !workspace.dir.join(".kubide").is_dir();
+    if welcome {
+        app.content.insert(
+            app.focus,
+            Content::Welcome(content::Welcome::new(&workspace.dir, session::recent_workspaces())),
+        );
+    } else if !restored {
+        // Tree on the left, work on the right, focus on the right. A window
+        // that opens as one full-width list of file names is a file manager;
+        // the tree is meant to be the thing beside what you are doing, and
+        // Ctrl+B takes it away when it is not wanted.
+        //
+        // A quarter of the width: half a window of file names is not a sidebar.
+        app.open_explorer();
+        if let Some(right) = app.tree.split_at(app.focus, Axis::Horizontal, 0.25) {
+            app.focus = right;
+        }
+        if let Some(file) = &workspace.file {
+            // `kubide file.rs` opens the file in that right-hand pane, so the
+            // project it came from stays visible next to it.
+            app.content.insert(app.focus, Content::open_path(file));
+        }
+    } else if let Some(file) = &workspace.file {
+        app.content.insert(app.focus, Content::open_path(file));
+    }
+
+    if !welcome {
+        session::note_workspace(&workspace.dir);
+        // Written once at startup as well as periodically: a crash in the
+        // first half minute should still leave a layout behind, and it proves
+        // the path is writable while there is still a person watching. Not
+        // for the welcome screen, though — remembering a session for
+        // wherever the exe woke up is exactly the noise it exists to avoid.
+        app.save_session();
+    }
+
+    let window = WindowConfig {
+        title: title_for(&workspace.dir),
+        backdrop: backdrop_of(app.cfg.window.backdrop),
+        caption_h: app.cfg.window.caption_height as i32,
+        ..Default::default()
+    };
+    kb_win::run(window, Box::new(app))
+}

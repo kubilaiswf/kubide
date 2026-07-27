@@ -1,0 +1,20 @@
+[package]
+name = "kb-syn"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+# tree-sitter, not regex. Regex highlighting is wrong on anything nested — a
+# string containing a keyword, a comment containing a quote, a raw string — and
+# every fix makes the next case worse. A real parser is the only honest option,
+# and the grammars are maintained by people who use them daily.
+#
+# Grammars are added one at a time, each one a compiled C dependency. Only the
+# languages this project is actually written in are here.
+[dependencies]
+tree-sitter = "0.26"
+tree-sitter-highlight = "0.26"
+tree-sitter-rust = "0.24"
+tree-sitter-json = "0.24"
+tree-sitter-toml-ng = "0.7"
+tree-sitter-md = "0.5"

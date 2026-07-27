@@ -1,0 +1,10 @@
+[package]
+name = "kb-edit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+# Only std, and no window. Editing is where correctness bugs hide — off-by-one
+# columns, undo that restores the wrong state, a save that rewrites every line
+# ending — and all of it is testable without drawing anything.
+[dependencies]

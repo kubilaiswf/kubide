@@ -1,0 +1,65 @@
+# Rosé Pine for kubide.
+#
+# Copy, recolour, save as mytheme.toml, set `theme = "mytheme"` in
+# config.toml. Anything left out keeps kubide's default.
+
+fg = "#e0def4"
+dim = "#908caa"
+accent = "#c4a7e7"
+warning = "#f6c177"
+error = "#eb6f92"
+divider = "#e0def41a"
+overlay = "#191724e0"
+
+[caption]
+fg = "#908caa"
+icon = "#e0def4"
+hover = "#ffffff17"
+press = "#ffffff0d"
+close_hover = "#eb6f92d9"
+close_press = "#c85a7ce6"
+
+[terminal]
+background = "#191724"
+foreground = "#e0def4"
+cursor = "#e0def4bf"
+selection = "#403d52"
+
+[terminal.ansi]
+black = "#26233a"
+red = "#eb6f92"
+green = "#31748f"
+yellow = "#f6c177"
+blue = "#9ccfd8"
+magenta = "#c4a7e7"
+cyan = "#ebbcba"
+white = "#e0def4"
+bright_black = "#6e6a86"
+bright_red = "#ef8aa5"
+bright_green = "#4a8ba6"
+bright_yellow = "#f8cf94"
+bright_blue = "#b1dbe2"
+bright_magenta = "#d2bcee"
+bright_cyan = "#f0ccca"
+bright_white = "#e0def4"
+
+[git]
+modified = "#f6c177"
+added = "#9ccfd8"
+deleted = "#eb6f92"
+untracked = "#31748f"
+conflicted = "#c4a7e7"
+
+[syntax]
+keyword = "#31748f"
+function = "#ebbcba"
+type = "#9ccfd8"
+string = "#f6c177"
+number = "#eb6f92"
+comment = "#6e6a86"
+constant = "#eb6f92"
+operator = "#908caa"
+punctuation = "#908caa"
+variable = "#e0def4"
+property = "#9ccfd8"
+attribute = "#c4a7e7"

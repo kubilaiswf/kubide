@@ -1,0 +1,65 @@
+# Nord for kubide.
+#
+# Copy, recolour, save as mytheme.toml, set `theme = "mytheme"` in
+# config.toml. Anything left out keeps kubide's default.
+
+fg = "#eceff4"
+dim = "#a5b0c4"
+accent = "#88c0d0"
+warning = "#ebcb8b"
+error = "#bf616a"
+divider = "#eceff41a"
+overlay = "#242933e0"
+
+[caption]
+fg = "#a5b0c4"
+icon = "#eceff4"
+hover = "#ffffff17"
+press = "#ffffff0d"
+close_hover = "#bf616ad9"
+close_press = "#a54e57e6"
+
+[terminal]
+background = "#242933"
+foreground = "#d8dee9"
+cursor = "#d8dee9bf"
+selection = "#434c5e"
+
+[terminal.ansi]
+black = "#3b4252"
+red = "#bf616a"
+green = "#a3be8c"
+yellow = "#ebcb8b"
+blue = "#81a1c1"
+magenta = "#b48ead"
+cyan = "#88c0d0"
+white = "#e5e9f0"
+bright_black = "#4c566a"
+bright_red = "#cb7b83"
+bright_green = "#b3cba0"
+bright_yellow = "#f0d7a3"
+bright_blue = "#94b1cc"
+bright_magenta = "#c29fbc"
+bright_cyan = "#8fbcbb"
+bright_white = "#eceff4"
+
+[git]
+modified = "#ebcb8b"
+added = "#a3be8c"
+deleted = "#bf616a"
+untracked = "#81a1c1"
+conflicted = "#b48ead"
+
+[syntax]
+keyword = "#81a1c1"
+function = "#88c0d0"
+type = "#8fbcbb"
+string = "#a3be8c"
+number = "#b48ead"
+comment = "#616e88"
+constant = "#d08770"
+operator = "#81a1c1"
+punctuation = "#aab3c4"
+variable = "#d8dee9"
+property = "#8fbcbb"
+attribute = "#d08770"

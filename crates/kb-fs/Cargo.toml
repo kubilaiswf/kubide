@@ -1,0 +1,10 @@
+[package]
+name = "kb-fs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+# Only std. A directory tree is std::fs plus sorting, and the interesting part
+# — what is visible after expanding and collapsing — needs no dependency and
+# tests without opening a window.
+[dependencies]

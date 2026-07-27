@@ -1,0 +1,15 @@
+[package]
+name = "kb-term"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+kb-cfg = { path = "../kb-cfg" }
+
+# VT state machine, grid and scrollback. Ships its own ConPTY, so portable-pty
+# isn't needed.
+#
+# Pinned exactly: the public API follows Alacritty's own needs rather than a
+# designed contract, and minor releases have broken it.
+alacritty_terminal = "=0.26.0"

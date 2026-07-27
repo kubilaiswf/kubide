@@ -1,0 +1,26 @@
+# Rust build output — fully reproducible.
+# No leading slash: it has to catch nested targets like spikes/*/target too.
+# `/target/` would only match the root.
+target/
+
+# MSVC debug symbols
+*.pdb
+
+# Editors / IDEs
+.vs/
+.vscode/
+*.user
+*.suo
+
+# OS
+Thumbs.db
+desktop.ini
+
+# Personal working notes — kept local, never committed.
+KARAR.md
+KARARLAR.md
+research/
+
+# Cargo.lock is committed ON PURPOSE: kubide is an application, not a library.
+# Pinning versions is what makes the same commit still build months later,
+# which matters most with fast-moving dependencies like windows-rs.

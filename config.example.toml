@@ -1,0 +1,317 @@
+# kubide configuration
+#
+# Copy to %APPDATA%\kubide\config.toml and edit. Saving applies immediately —
+# no restart. Every value below is the default, so an empty file behaves the
+# same as this one.
+#
+# Set KUBIDE_CONFIG to point somewhere else, e.g. to try a config without
+# touching your real one.
+#
+# A project can carry its own overrides in <project>\.kubide\config.toml —
+# same format, wins over this file while that project is open. `kubide
+# workspace` in a terminal creates one and marks the folder.
+#
+# The mark is not needed to be opened: a bare `kubide` walks up from wherever
+# the shell is standing and opens the project it finds — a .kubide first, then
+# a repository, then a Cargo.toml or package.json. What the mark adds is a
+# folder that answers for itself: it outranks anything above it, and its
+# window layout is remembered inside it, so the project keeps its arrangement
+# when it is renamed or moved.
+#
+# Unknown keys are an error rather than being ignored: a typo you can see beats
+# a setting that silently does nothing. Errors show up in the status bar.
+
+# A named theme from %APPDATA%\kubide\themes\<name>.toml. kubide seeds that
+# folder on first start with its built-ins — gruvbox, catppuccin, tokyonight,
+# nord, rose-pine — and a file you drop there wins over the built-in with the
+# same name. Copy one, recolour it, save: the window repaints as you go, no
+# restart. When `theme` is a name like this, the inline [theme] table cannot
+# also be set — TOML gives the key to one owner, which is the right amount
+# of rope.
+# theme = "gruvbox"
+
+[window]
+# none | mica | mica-alt | acrylic
+#
+# acrylic blurs whatever is behind the window. mica samples the wallpaper once
+# and is cheaper but opaque. All of them fall back to a flat color when Windows
+# has "Transparency effects" off, in Energy Saver, or in High Contrast.
+backdrop = "acrylic"
+
+# Height of the draggable title strip, and the gap around the pane area.
+caption_height = 40.0
+padding = 14.0
+
+[font]
+# Tried in order; the first installed one wins. Consolas is always present, so
+# there is always something to fall back to.
+#
+# The file-tree icons, the branch symbol and the timer's clock are Nerd Font
+# glyphs. kubide asks the font whether it has them rather than assuming: with
+# no Nerd Font installed the tree falls back to `▸`/`▾` expanders and the two
+# symbols are dropped, so it looks plain instead of a column of empty boxes.
+# Install a Nerd Font and put it first here to get the icons back; the status
+# bar shows which family was actually chosen.
+# The "Mono" variants come first on purpose: their icons are one cell wide,
+# which is what the grid needs. "NFM" is just Nerd Fonts' abbreviation of
+# "Nerd Font Mono" — both spellings are listed because which one you have
+# depends on when you downloaded the font.
+family = [
+    "JetBrainsMono NFM",
+    "JetBrainsMono Nerd Font Mono",
+    "CaskaydiaCove NFM",
+    "CaskaydiaCove Nerd Font Mono",
+    "FiraCode NFM",
+    "FiraCode Nerd Font Mono",
+    "JetBrainsMono Nerd Font",
+    "CaskaydiaCove Nerd Font",
+    "FiraCode Nerd Font",
+    "JetBrains Mono",
+    "Cascadia Code",
+    "Consolas",
+]
+size = 14.0
+
+[terminal]
+# Leave shell unset for the system default. Changes apply to terminals opened
+# from here on; running ones are never restarted under you.
+# shell = "pwsh.exe"
+# args = ["-NoLogo"]
+
+# Scrollback lines. Without enough of it you can't see the top of a build log.
+scrollback = 10000
+
+# ---------------------------------------------------------------------------
+# Status bar
+#
+# Every segment is a plain on/off. Turn off what you don't look at — a status
+# bar you can't switch things off in becomes a place other people's ideas
+# accumulate.
+
+[status]
+cursor = true       # Ln, Col, and the selection size
+font = true
+panes = true
+frame_time = true   # the honesty check: when this creeps up, something is slow
+git = true          # branch, and how many files are changed
+clock = false
+clock_24h = true    # false gives a 12-hour clock
+pomodoro = false    # the work timer, F9 to start
+
+# The quiet shortcut hint at the right end of the status bar, still clickable.
+# Only the hint is remembered — the pinned shortcut panel covers the code you
+# were reading and is meant to be put up and taken down again.
+#
+# On by default: nothing else here says how to reach the commands or the
+# settings, and a few grey words at the end of the bar are a small price for
+# not being stuck in whatever you opened.
+[help]
+visible = true
+
+[editor]
+# ( brings ), with the caret between; typing the closer steps over the one
+# already there; backspace between a pair takes both. All or nothing —
+# people who hate auto-closing hate it completely.
+auto_close = true
+# Type a trigger word and press Tab: `print` becomes println!(""); in a .rs
+# file, printf(""); in a .c file. The triggers live one file per extension
+# in %APPDATA%\kubide\snippets (rs.toml, py.toml, ...), seeded with starters
+# on first run — add your own lines there, $0 marks where the caret lands.
+snippets = true
+
+# The work timer. It counts down in the status bar and stops; it does not pop
+# up, make noise, or take focus. An editor that interrupts you is the opposite
+# of what this is for.
+[pomodoro]
+work = 25
+short_break = 5
+long_break = 15
+rounds = 4          # work periods before the long break
+# Start the next period by itself. Off by default: a timer that counts your
+# break while you are still typing is nagging, not helping.
+auto_advance = false
+
+# ---------------------------------------------------------------------------
+# Keys
+#
+# Bindings merge over the defaults, so rebinding one key doesn't cost you the
+# rest. Bind to "none" to remove a default:
+#
+#     "ctrl+q" = "none"
+#
+# Modifiers: ctrl, shift, alt, in any order. Keys: letters, digits, arrows,
+# enter, escape, space, tab, backspace, delete, home, end, pageup, pagedown,
+# f1-f12, backslash, slash, comma, period, semicolon, quote, leftbracket,
+# rightbracket, plus, minus, numpadplus, numpadminus.
+#
+# Actions: split-right, split-down, close-pane, open-terminal, open-explorer,
+# toggle-explorer, new-file, new-folder, rename, delete, focus-left, focus-right, focus-up, focus-down, copy, paste,
+# cut, save, undo, redo, select-all, commands, go-to-file, find, go-to-line,
+# find-in-project, toggle-comment, move-line-up, move-line-down, duplicate-line, font-larger,
+# pomodoro-toggle, pomodoro-reset, pomodoro-skip, font-larger, font-smaller,
+# quit.
+#
+# Note on layouts: letters and digits have the same virtual-key code on every
+# keyboard layout, the OEM keys do not. That's why split is bound to Ctrl+2/3
+# as well as Ctrl+\ — on a Turkish Q layout backslash needs AltGr, AltGr is
+# Ctrl+Alt on Windows, so Ctrl+\ can never physically be pressed.
+#
+# Unmodified keys go to whatever the pane holds, so binding one takes it away
+# from the terminal.
+
+[keys]
+"ctrl+backslash" = "split-right"
+"ctrl+2" = "split-right"
+"ctrl+shift+backslash" = "split-down"
+"ctrl+3" = "split-down"
+"ctrl+w" = "close-pane"
+"ctrl+t" = "open-terminal"
+"ctrl+e" = "open-explorer"
+"ctrl+b" = "toggle-explorer"
+# F1 is where people press for help, and the command list is the better answer:
+# the same list as the pinned panel, searchable, and every row does something.
+# The panel is a preference rather than a destination, so it takes the modified
+# key. Both are function keys because Ctrl+, is an OEM key and cannot be the
+# only way in.
+"f1" = "commands"
+"ctrl+f1" = "toggle-help"
+"shift+f1" = "open-settings"
+"ctrl+comma" = "open-settings"
+# Explorer-scope: these only fire while the tree has focus, so the editor
+# keeps its Delete key and the terminal keeps Ctrl+N.
+"ctrl+n" = "new-file"
+"ctrl+shift+n" = "new-folder"
+"f2" = "rename"
+"delete" = "delete"
+"alt+left" = "focus-left"
+"alt+right" = "focus-right"
+"alt+up" = "focus-up"
+"alt+down" = "focus-down"
+# Panes are numbered by where they are on screen, top to bottom then left to
+# right, so the number means the same thing every time you press it.
+"alt+1" = "focus-pane-1"
+"alt+2" = "focus-pane-2"
+"alt+3" = "focus-pane-3"
+"alt+4" = "focus-pane-4"
+"alt+5" = "focus-pane-5"
+"alt+6" = "focus-pane-6"
+"alt+7" = "focus-pane-7"
+"alt+8" = "focus-pane-8"
+"alt+9" = "focus-pane-9"
+# Ctrl+Alt is AltGr, which is normally a bad idea here — see the note at the
+# top of this section. Arrows are the exception: no layout puts a character on
+# AltGr+arrow, so nothing is swallowed.
+"ctrl+alt+right" = "grow-pane-width"
+"ctrl+alt+left" = "shrink-pane-width"
+"ctrl+alt+down" = "grow-pane-height"
+"ctrl+alt+up" = "shrink-pane-height"
+# The caption buttons, for when you would rather not reach for the mouse.
+"alt+f9" = "minimize-window"
+"alt+f10" = "toggle-maximize"
+# Copy is the shifted pair on purpose: plain Ctrl+C is SIGINT in a terminal.
+"ctrl+shift+c" = "copy"
+"ctrl+shift+v" = "paste"
+# Editor-scope: these step aside when a terminal has focus, because a shell
+# needs Ctrl+A, Ctrl+Z and Ctrl+X as control characters.
+"ctrl+s" = "save"
+"ctrl+z" = "undo"
+"ctrl+y" = "redo"
+"ctrl+shift+z" = "redo"
+"ctrl+a" = "select-all"
+"ctrl+x" = "cut"
+"ctrl+plus" = "font-larger"
+"ctrl+numpadplus" = "font-larger"
+"ctrl+minus" = "font-smaller"
+"ctrl+numpadminus" = "font-smaller"
+"ctrl+p" = "go-to-file"
+"ctrl+shift+p" = "commands"
+"ctrl+f" = "find"
+"ctrl+shift+f" = "find-in-project"
+"ctrl+g" = "go-to-line"
+# Ctrl+/ is unreachable on a Turkish Q layout: VK_OEM_2 is `ö` there and the
+# slash is on Shift+7. Ctrl+7 is the same key everywhere.
+"ctrl+/" = "toggle-comment"
+"ctrl+7" = "toggle-comment"
+"ctrl+d" = "duplicate-line"
+# Not Alt+arrow, which moves pane focus here.
+"ctrl+shift+up" = "move-line-up"
+"ctrl+shift+down" = "move-line-down"
+# The timer is a background thing, so it gets F-keys rather than a letter
+# someone might want for editing.
+"f9" = "pomodoro-toggle"
+"shift+f9" = "pomodoro-reset"
+"ctrl+f9" = "pomodoro-skip"
+"ctrl+q" = "quit"
+
+# ---------------------------------------------------------------------------
+# Theme
+#
+# Colors are "#rrggbb" or "#rrggbbaa". You only need to write the ones you
+# change; everything else keeps its default.
+
+[theme]
+fg = "#edebe6"
+dim = "#ada8a3"          # pane labels, status bar
+accent = "#8cb8f2"       # focus stripe
+warning = "#f2cc73"
+error = "#f28c8c"
+divider = "#ffffff1a"    # pane hairline
+overlay = "#14141ce0"    # Ctrl+P / Ctrl+F backdrop
+
+[theme.caption]
+fg = "#b3b0ad"
+icon = "#f2f0ed"
+hover = "#ffffff17"
+press = "#ffffff0d"
+close_hover = "#e64047d9"
+close_press = "#bf333ae6"
+
+# Syntax roles. tree-sitter capture names fall back onto these, so
+# keyword.control.return still lands on "keyword".
+[theme.syntax]
+keyword = "#c7a0e8"
+function = "#8cb8f2"
+type = "#7dd4c4"
+string = "#9ccf8e"
+number = "#e8a97c"
+comment = "#767b86"     # dim: a comment you skip beats one you read past
+constant = "#e8a97c"
+operator = "#c2bfba"
+punctuation = "#9b9792"
+variable = "#edebe6"
+property = "#93c9d8"
+attribute = "#d6b27a"
+
+# File status in the explorer.
+[theme.git]
+modified = "#e0b15c"
+added = "#8fc88a"
+deleted = "#d97b7b"
+untracked = "#7d8ba6"
+conflicted = "#e06ca8"
+
+[theme.terminal]
+# Cells matching `background` are NOT painted, so the acrylic shows through.
+# Changing it doesn't set a color — it picks which cells stay transparent.
+background = "#11111b"
+foreground = "#cdd6f4"
+cursor = "#ccd9f2bf"
+selection = "#3a4a6e"
+
+[theme.terminal.ansi]
+black = "#1a1822"
+red = "#f38ba8"
+green = "#a6e3a1"
+yellow = "#f9e2af"
+blue = "#89b4fa"
+magenta = "#cba6f7"
+cyan = "#94e2d5"
+white = "#cdd6f4"
+bright_black = "#585b70"
+bright_red = "#f59fba"
+bright_green = "#b8e9b4"
+bright_yellow = "#fae8c0"
+bright_blue = "#9cc0fb"
+bright_magenta = "#d5b8f9"
+bright_cyan = "#a8e8dd"
+bright_white = "#e6edf7"

@@ -1,0 +1,13 @@
+[package]
+name = "kb-cfg"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
+
+# Live reload. 8.x is the stable line; 9.0 has been in RC since January 2026.
+notify = "8"
+notify-debouncer-full = "0.6"

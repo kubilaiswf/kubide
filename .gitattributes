@@ -1,0 +1,10 @@
+# LF in the repo, native endings in the working copy.
+# We develop on Windows, but the repo stays consistent so diffs do not fill up
+# with line-ending noise if Linux support ever lands.
+* text=auto
+
+*.rs      text diff=rust
+*.toml    text
+*.md      text
+*.ps1     text eol=crlf
+*.lock    text -diff

@@ -1,0 +1,20 @@
+[package]
+name = "kubide"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+kb-cfg = { path = "../kb-cfg" }
+kb-edit = { path = "../kb-edit" }
+kb-find = { path = "../kb-find" }
+kb-fs = { path = "../kb-fs" }
+kb-gfx = { path = "../kb-gfx" }
+kb-git = { path = "../kb-git" }
+kb-syn = { path = "../kb-syn" }
+kb-text = { path = "../kb-text" }
+kb-term = { path = "../kb-term" }
+kb-ui = { path = "../kb-ui" }
+kb-win = { path = "../kb-win" }
+windows.workspace = true
+windows-numerics.workspace = true

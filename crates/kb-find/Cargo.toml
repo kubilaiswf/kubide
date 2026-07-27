@@ -1,0 +1,10 @@
+[package]
+name = "kb-find"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+# Fuzzy matching is a scoring function over strings. Pulling in a crate for it
+# would mean inheriting someone else's idea of what ranks higher, which is the
+# entire user-visible behaviour of a file finder.
+[dependencies]

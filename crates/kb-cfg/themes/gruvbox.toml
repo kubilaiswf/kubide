@@ -1,0 +1,67 @@
+# Gruvbox (dark) for kubide.
+#
+# This file is the whole theme format: copy it, recolour it, save it in this
+# folder as mytheme.toml, and set `theme = "mytheme"` in config.toml.
+# Anything you leave out keeps kubide's default — a theme can be one line.
+# Colours are "#rrggbb", or "#rrggbbaa" when they carry transparency.
+
+fg = "#ebdbb2"        # main text
+dim = "#a89984"       # labels, hints, line numbers
+accent = "#83a598"    # focus, selection, highlights
+warning = "#fabd2f"
+error = "#fb4934"
+divider = "#ebdbb21a" # pane hairline — mostly transparent on purpose
+overlay = "#1d2021e0" # the command palette's backdrop
+
+[caption]
+fg = "#a89984"
+icon = "#ebdbb2"
+hover = "#ffffff17"
+press = "#ffffff0d"
+close_hover = "#cc241dd9"
+close_press = "#9d0006e6"
+
+[terminal]
+background = "#1d2021" # cells of exactly this colour stay transparent
+foreground = "#ebdbb2"
+cursor = "#ebdbb2bf"
+selection = "#504945"
+
+[terminal.ansi]
+black = "#282828"
+red = "#cc241d"
+green = "#98971a"
+yellow = "#d79921"
+blue = "#458588"
+magenta = "#b16286"
+cyan = "#689d6a"
+white = "#a89984"
+bright_black = "#928374"
+bright_red = "#fb4934"
+bright_green = "#b8bb26"
+bright_yellow = "#fabd2f"
+bright_blue = "#83a598"
+bright_magenta = "#d3869b"
+bright_cyan = "#8ec07c"
+bright_white = "#ebdbb2"
+
+[git]
+modified = "#d79921"
+added = "#b8bb26"
+deleted = "#fb4934"
+untracked = "#83a598"
+conflicted = "#d3869b"
+
+[syntax]
+keyword = "#fb4934"
+function = "#8ec07c"
+type = "#fabd2f"
+string = "#b8bb26"
+number = "#d3869b"
+comment = "#928374"
+constant = "#d3869b"
+operator = "#ebdbb2"
+punctuation = "#a89984"
+variable = "#ebdbb2"
+property = "#83a598"
+attribute = "#fe8019"

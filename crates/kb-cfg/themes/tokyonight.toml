@@ -1,0 +1,65 @@
+# Tokyo Night for kubide.
+#
+# Copy, recolour, save as mytheme.toml, set `theme = "mytheme"` in
+# config.toml. Anything left out keeps kubide's default.
+
+fg = "#c0caf5"
+dim = "#a9b1d6"
+accent = "#7aa2f7"
+warning = "#e0af68"
+error = "#f7768e"
+divider = "#c0caf51a"
+overlay = "#16161ee0"
+
+[caption]
+fg = "#a9b1d6"
+icon = "#c0caf5"
+hover = "#ffffff17"
+press = "#ffffff0d"
+close_hover = "#f7768ed9"
+close_press = "#db5b76e6"
+
+[terminal]
+background = "#16161e"
+foreground = "#c0caf5"
+cursor = "#c0caf5bf"
+selection = "#33467c"
+
+[terminal.ansi]
+black = "#15161e"
+red = "#f7768e"
+green = "#9ece6a"
+yellow = "#e0af68"
+blue = "#7aa2f7"
+magenta = "#bb9af7"
+cyan = "#7dcfff"
+white = "#a9b1d6"
+bright_black = "#414868"
+bright_red = "#f98da1"
+bright_green = "#b0d97e"
+bright_yellow = "#e8c07e"
+bright_blue = "#8fb1f9"
+bright_magenta = "#c9adf9"
+bright_cyan = "#94d8ff"
+bright_white = "#c0caf5"
+
+[git]
+modified = "#e0af68"
+added = "#9ece6a"
+deleted = "#f7768e"
+untracked = "#7dcfff"
+conflicted = "#bb9af7"
+
+[syntax]
+keyword = "#bb9af7"
+function = "#7aa2f7"
+type = "#2ac3de"
+string = "#9ece6a"
+number = "#ff9e64"
+comment = "#565f89"
+constant = "#ff9e64"
+operator = "#89ddff"
+punctuation = "#a9b1d6"
+variable = "#c0caf5"
+property = "#73daca"
+attribute = "#e0af68"

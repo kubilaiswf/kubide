@@ -1,0 +1,12 @@
+[package]
+name = "kb-git"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+# No libgit2. The git CLI is the reference implementation, it already handles
+# worktrees, submodules, sparse checkouts and every config option, and it is
+# installed on any machine that has a repository to look at. Linking a second
+# implementation to answer "which files changed" is not worth its own bug
+# surface.
+[dependencies]

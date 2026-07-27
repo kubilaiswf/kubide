@@ -1,0 +1,9 @@
+[package]
+name = "kb-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+# Deliberately dependency-free: pure geometry and tree logic.
+# Knows nothing about windows or the GPU, so it tests without opening one.
+[dependencies]
