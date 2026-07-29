@@ -1,0 +1,66 @@
+# Desert Night for kubide.
+#
+# From colorhunt.co's 222831 / 393E46 / 948979 / DFD0B8 — the midnight
+# charcoals with sand where the neon would be. Warm, low-glare, nothing
+# fluorescent anywhere.
+
+fg = "#dfd0b8"        # main text
+dim = "#948979"       # labels, hints, line numbers
+accent = "#c8b491"    # focus, selection, highlights — the sand, brightened
+warning = "#e0b154"
+error = "#d97662"
+divider = "#dfd0b81a" # pane hairline — mostly transparent on purpose
+overlay = "#222831f2" # the command palette's backdrop
+
+[caption]
+fg = "#948979"
+icon = "#dfd0b8"
+hover = "#ffffff17"
+press = "#ffffff0d"
+close_hover = "#d97662d9"
+close_press = "#b25a48e6"
+
+[terminal]
+background = "#222831" # cells of exactly this colour stay transparent
+foreground = "#dfd0b8"
+cursor = "#dfd0b8bf"
+selection = "#393e46"
+
+[terminal.ansi]
+black = "#222831"
+red = "#d97662"
+green = "#a4b07e"
+yellow = "#e0b154"
+blue = "#8fa3b8"
+magenta = "#bd8f9e"
+cyan = "#94b3a2"
+white = "#c8bca7"
+bright_black = "#5c6168"
+bright_red = "#eb9280"
+bright_green = "#becc93"
+bright_yellow = "#f0c878"
+bright_blue = "#aec2d6"
+bright_magenta = "#d4a9b8"
+bright_cyan = "#aecfbd"
+bright_white = "#efe5d3"
+
+[git]
+modified = "#e0b154"
+added = "#a4b07e"
+deleted = "#d97662"
+untracked = "#94b3a2"
+conflicted = "#bd8f9e"
+
+[syntax]
+keyword = "#d97662"
+function = "#94b3a2"
+type = "#e0b154"
+string = "#becc93"
+number = "#d4a9b8"
+comment = "#5c6168"
+constant = "#d4a9b8"
+operator = "#dfd0b8"
+punctuation = "#948979"
+variable = "#dfd0b8"
+property = "#aec2d6"
+attribute = "#e09a56"

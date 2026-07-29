@@ -45,6 +45,17 @@ pub struct Picker {
     matches: Vec<kb_find::Match>,
     /// What has been typed into the search box.
     pub filter: String,
+    /// The address bar as an editable line, when someone clicked into it or
+    /// pressed Ctrl+L. `None` means the crumbs are showing. Explorer does
+    /// exactly this — the crumbs are a view, the path is the truth, and a
+    /// click swaps one for the other.
+    pub address: Option<String>,
+    /// Whether the active line — address, or the search box otherwise — is
+    /// selected whole, so the next keystroke replaces it. Ctrl+A sets it,
+    /// and the address bar opens with it set, because that is how
+    /// Explorer's opens and typing over the old path is the whole reason
+    /// to open it.
+    pub select_all: bool,
     /// Into `matches`. `None` until a row is chosen: the dialog opens with
     /// nothing selected, like the real one.
     pub selected: Option<usize>,
@@ -81,6 +92,8 @@ impl Picker {
             entries: Vec::new(),
             matches: Vec::new(),
             filter: String::new(),
+            address: None,
+            select_all: false,
             selected: None,
             top: 0,
             follow: false,
@@ -98,6 +111,9 @@ impl Picker {
     /// Browses into `dir` as a new step: anything Forward pointed at is
     /// gone, the way every browser's history works.
     pub fn navigate(&mut self, dir: PathBuf) {
+        // Arriving somewhere ends the address edit either way.
+        self.address = None;
+        self.select_all = false;
         if dir == self.dir {
             return;
         }
@@ -200,12 +216,45 @@ impl Picker {
         }
     }
 
+    /// Opens the address bar for typing, current path filled in and
+    /// selected — typing over the old path is the whole reason to open it.
+    pub fn edit_address(&mut self) {
+        self.address = Some(self.dir.display().to_string());
+        self.select_all = true;
+    }
+
+    /// Consumes a pending select-all by clearing the selected line.
+    /// Returns whether it did — a backspace that cleared the line is done.
+    pub fn clear_selected(&mut self) -> bool {
+        if !self.select_all {
+            return false;
+        }
+        self.select_all = false;
+        if let Some(a) = &mut self.address {
+            a.clear();
+        } else {
+            self.filter.clear();
+            self.refilter();
+        }
+        true
+    }
+
     pub fn push(&mut self, c: char) {
+        // A selected line is replaced by what is typed over it.
+        self.clear_selected();
+        // While the address bar is open, it owns the typing.
+        if let Some(a) = &mut self.address {
+            a.push(c);
+            return;
+        }
         self.filter.push(c);
         self.refilter();
     }
 
     pub fn backspace(&mut self) {
+        if self.clear_selected() {
+            return;
+        }
         self.filter.pop();
         self.refilter();
     }

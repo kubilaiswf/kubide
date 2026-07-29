@@ -45,7 +45,19 @@ impl FileTree {
             problem: None,
         };
         me.rebuild();
+        me.selected = me.opening_row();
         me
+    }
+
+    /// Where the cursor sits when a tree is first shown.
+    ///
+    /// `.git` sorts first among the directories and is the one folder in a
+    /// project nobody opens on purpose; landing on it means the first Enter
+    /// of a session expands plumbing. It stays in the list — hiding a folder
+    /// someone might genuinely want is the worse trade — it just does not get
+    /// handed the cursor.
+    fn opening_row(&self) -> usize {
+        self.rows.iter().position(|r| r.name != ".git").unwrap_or(0)
     }
 
     pub fn root(&self) -> &Path {
@@ -88,6 +100,7 @@ impl FileTree {
         self.open.clear();
         self.selected = 0;
         self.rebuild();
+        self.selected = self.opening_row();
     }
 
     fn rebuild(&mut self) {
@@ -418,6 +431,62 @@ pub fn find_root(start: &Path) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
+/// Short labels for a list of paths, grown until no two read the same.
+///
+/// A list of remembered projects is a list of last segments — `kubide`,
+/// `promptly-app` — right up until two of them are called `release`, and then
+/// the list is asking someone to pick between two identical rows. Only the
+/// rows that actually clash take a parent, so one awkward pair does not push
+/// a path onto every other line.
+///
+/// Comparison is case-insensitive: `Release` and `release` are the same row to
+/// the eye, and the eye is what this is for.
+pub fn distinct_labels(paths: &[PathBuf]) -> Vec<String> {
+    // How many trailing segments each label shows. Grows only where needed.
+    let mut depth = vec![1usize; paths.len()];
+    let segments: Vec<Vec<String>> = paths
+        .iter()
+        .map(|p| {
+            // The root separator is dropped: on Windows `C:\a` is prefix,
+            // root, name, and keeping the root would join back as `C:\\a`.
+            // The prefix stays, because it is the last thing that can tell
+            // two otherwise identical paths apart.
+            p.components()
+                .filter(|c| !matches!(c, std::path::Component::RootDir))
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect()
+        })
+        .collect();
+
+    let label_of = |i: usize, depth: &[usize]| -> String {
+        let segs = &segments[i];
+        let take = depth[i].min(segs.len()).max(1);
+        segs[segs.len().saturating_sub(take)..].join("\\")
+    };
+
+    // Bounded by the deepest path: every round grows a clashing row by one
+    // segment, and a row that has run out of parents stops growing.
+    let rounds = segments.iter().map(Vec::len).max().unwrap_or(1);
+    for _ in 0..rounds {
+        let labels: Vec<String> = (0..paths.len()).map(|i| label_of(i, &depth)).collect();
+        let mut grew = false;
+        for i in 0..paths.len() {
+            let clashes = labels
+                .iter()
+                .enumerate()
+                .any(|(j, l)| j != i && l.eq_ignore_ascii_case(&labels[i]));
+            if clashes && depth[i] < segments[i].len() {
+                depth[i] += 1;
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    (0..paths.len()).map(|i| label_of(i, &depth)).collect()
+}
+
 /// Nerd Font glyph for a name. Falls back to a plain file glyph, so a missing
 /// mapping looks ordinary rather than broken.
 pub fn icon(name: &str, is_dir: bool, open: bool) -> char {
@@ -493,6 +562,44 @@ impl Icons {
 mod tests {
     use super::*;
 
+    #[test]
+    fn labels_grow_only_where_they_clash() {
+        let paths: Vec<PathBuf> = [
+            r"C:\work\kubide",
+            r"C:\3d-kubi\release",
+            r"C:\rust-kubi\release",
+            r"C:\Users\me\Documents",
+        ]
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+        assert_eq!(
+            distinct_labels(&paths),
+            [r"kubide", r"3d-kubi\release", r"rust-kubi\release", r"Documents"],
+            "only the two `release` rows pay for the ambiguity"
+        );
+    }
+
+    #[test]
+    fn labels_stop_growing_when_the_parents_run_out() {
+        // Same last segment, same parent, different roots: the labels can only
+        // separate at the drive, and must not loop trying to go further.
+        let paths: Vec<PathBuf> =
+            [r"C:\a\release", r"D:\a\release"].iter().map(PathBuf::from).collect();
+        assert_eq!(distinct_labels(&paths), [r"C:\a\release", r"D:\a\release"]);
+
+        // Genuinely identical paths cannot be told apart; the answer is the
+        // full path twice, not an infinite loop.
+        let same: Vec<PathBuf> = [r"C:\a", r"C:\a"].iter().map(PathBuf::from).collect();
+        assert_eq!(distinct_labels(&same), [r"C:\a", r"C:\a"]);
+    }
+
+    #[test]
+    fn a_drive_root_labels_itself_without_the_slash() {
+        let paths: Vec<PathBuf> = [r"C:\", r"D:\"].iter().map(PathBuf::from).collect();
+        assert_eq!(distinct_labels(&paths), ["C:", "D:"]);
+    }
+
     /// Builds a small tree on disk. Real files rather than a mock: the thing
     /// being tested is how std::fs actually behaves, sorting included.
     fn fixture(name: &str) -> PathBuf {
@@ -515,6 +622,20 @@ mod tests {
     fn directories_come_first_then_files_alphabetically() {
         let t = FileTree::new(fixture("sort"));
         assert_eq!(names(&t), ["assets", "src", "Cargo.toml", "README.md"]);
+    }
+
+    #[test]
+    fn the_cursor_does_not_open_on_dot_git() {
+        let dir = fixture("dotgit");
+        std::fs::create_dir_all(dir.join(".git").join("objects")).unwrap();
+        let t = FileTree::new(&dir);
+        assert_eq!(t.rows()[0].name, ".git", "still listed, still first");
+        assert_eq!(t.selected_row().unwrap().name, "assets", "but not handed the cursor");
+
+        // And the same on a workspace switch, which is the common way in.
+        let mut t = FileTree::new(dir.join("src"));
+        t.set_root(&dir);
+        assert_eq!(t.selected_row().unwrap().name, "assets");
     }
 
     #[test]

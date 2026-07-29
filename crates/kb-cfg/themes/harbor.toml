@@ -1,0 +1,66 @@
+# Harbor for kubide.
+#
+# From colorhunt.co's 1B3C53 / 234C6A / 456882 / D2C1B6 — three depths of
+# harbor water and one strip of sand. Blue does the structure, sand does
+# the reading.
+
+fg = "#d2c1b6"        # main text
+dim = "#8ba3b5"       # labels, hints, line numbers
+accent = "#6f94ad"    # focus, selection, highlights — the palette's top blue, lifted
+warning = "#dcb168"
+error = "#d16a6a"
+divider = "#d2c1b61a" # pane hairline — mostly transparent on purpose
+overlay = "#1b3c53f2" # the command palette's backdrop
+
+[caption]
+fg = "#8ba3b5"
+icon = "#d2c1b6"
+hover = "#ffffff17"
+press = "#ffffff0d"
+close_hover = "#d16a6ad9"
+close_press = "#ab4f4fe6"
+
+[terminal]
+background = "#1b3c53" # cells of exactly this colour stay transparent
+foreground = "#d2c1b6"
+cursor = "#d2c1b6bf"
+selection = "#234c6a"
+
+[terminal.ansi]
+black = "#1b3c53"
+red = "#d16a6a"
+green = "#89b483"
+yellow = "#dcb168"
+blue = "#6f94ad"
+magenta = "#ab8ab8"
+cyan = "#72b0ab"
+white = "#c0b2a8"
+bright_black = "#54728a"
+bright_red = "#e58c8c"
+bright_green = "#a8cea2"
+bright_yellow = "#eec88c"
+bright_blue = "#92b4cb"
+bright_magenta = "#c4a7d1"
+bright_cyan = "#93cbc6"
+bright_white = "#e8ddd5"
+
+[git]
+modified = "#dcb168"
+added = "#89b483"
+deleted = "#d16a6a"
+untracked = "#6f94ad"
+conflicted = "#ab8ab8"
+
+[syntax]
+keyword = "#92b4cb"
+function = "#93cbc6"
+type = "#dcb168"
+string = "#a8cea2"
+number = "#c4a7d1"
+comment = "#54728a"
+constant = "#c4a7d1"
+operator = "#d2c1b6"
+punctuation = "#8ba3b5"
+variable = "#d2c1b6"
+property = "#b5aa9c"
+attribute = "#dc9668"

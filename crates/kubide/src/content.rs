@@ -340,6 +340,35 @@ impl Editor {
     }
 }
 
+/// The keys an empty screen teaches, in the order someone stuck needs them:
+/// how to get a project, how to reach a file inside it, and the one key that
+/// finds every other key.
+///
+/// One list, shared by the welcome screen and the empty pane, because those
+/// two were quietly disagreeing about what a beginner needs — and the empty
+/// pane, which is the one people actually see (every split makes another),
+/// was the one that left out the command list.
+///
+/// Read through the keymap at the point of drawing, never printed from here:
+/// after a rebind a hardcoded chord would be advertising a dead key.
+pub const STARTER_KEYS: [(kb_cfg::Action, &str); 6] = [
+    (kb_cfg::Action::OpenFolder, "open folder"),
+    (kb_cfg::Action::GoToFile, "go to file"),
+    (kb_cfg::Action::Commands, "all commands"),
+    (kb_cfg::Action::OpenTerminal, "terminal"),
+    (kb_cfg::Action::ToggleExplorer, "file tree"),
+    (kb_cfg::Action::OpenSettings, "settings"),
+];
+
+/// The two keys that only mean anything once there is a pane to be in.
+///
+/// Splitting is deliberately not here: an empty pane exists *because* someone
+/// just split, and teaching the key they pressed a second ago is noise.
+pub const PANE_KEYS: [(kb_cfg::Action, &str); 2] = [
+    (kb_cfg::Action::ClosePane, "close pane"),
+    (kb_cfg::Action::FocusRight, "move focus"),
+];
+
 /// The screen a bare `kubide` opens on when launched somewhere it has no
 /// session for — a double-click on the exe, mostly. A quiet wordmark, the
 /// keys that matter, and the places you have been: the welcome tab of the
@@ -354,18 +383,22 @@ pub struct Welcome {
 
 impl Welcome {
     pub fn new(cwd: &Path, recents: Vec<PathBuf>) -> Self {
-        let name = |p: &Path| {
-            p.file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| p.display().to_string())
-        };
-        let mut rows = vec![(format!("{} (this folder)", name(cwd)), cwd.to_path_buf())];
-        rows.extend(
-            recents
-                .into_iter()
-                .filter(|p| p != cwd)
-                .map(|p| (name(&p), p)),
-        );
+        // Labelled as one list, the current folder included: two projects both
+        // called `release` are a coin toss, and the row that says which is
+        // which has to come from looking at all of them at once.
+        let paths: Vec<PathBuf> = std::iter::once(cwd.to_path_buf())
+            .chain(recents.into_iter().filter(|p| p != cwd))
+            .collect();
+        let labels = kb_fs::distinct_labels(&paths);
+        let rows = labels
+            .into_iter()
+            .zip(paths)
+            .enumerate()
+            .map(|(i, (label, path))| {
+                let label = if i == 0 { format!("{label} (this folder)") } else { label };
+                (label, path)
+            })
+            .collect();
         Self { rows, selected: 0 }
     }
 

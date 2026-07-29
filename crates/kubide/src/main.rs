@@ -40,6 +40,17 @@ struct Kubide {
     /// Dragged divider and the last mouse position.
     dragging: Option<(DividerRef, f32, f32)>,
     hover_divider: Option<Axis>,
+    /// Where the mouse last was, for deciding what the pointer should look
+    /// like over that spot.
+    mouse: (f32, f32),
+    /// When an overlay's text box last took a keystroke. A caret that
+    /// blinks from the moment you arrive is noise; one that holds still
+    /// while you type and blinks once you stop is the thing everyone
+    /// recognises as "this box is waiting for you".
+    typed_at: Instant,
+    /// The blink phase at the last tick, so the redraw happens on the flip
+    /// and not sixty times a second.
+    blink_last: bool,
     frame_ms: f64,
     /// What each pane holds. Panes with no entry are empty.
     content: HashMap<PaneId, Content>,
@@ -228,6 +239,9 @@ pub struct PickerHits {
     /// Breadcrumb segments: x range and the directory each one names.
     pub crumb_y: (f32, f32),
     pub crumbs: Vec<(f32, f32, PathBuf)>,
+    /// The address box itself; a click on it that lands on no crumb opens
+    /// the bar for typing, like Explorer's.
+    pub addr_x: (f32, f32),
     /// The left rail: top of the first row, then one entry per drawn row —
     /// `None` for the group labels, which are furniture, not places.
     pub places_y0: f32,
@@ -416,6 +430,9 @@ impl Kubide {
             area: Rect::default(),
             dragging: None,
             hover_divider: None,
+            mouse: (0.0, 0.0),
+            typed_at: Instant::now(),
+            blink_last: true,
             frame_ms: 0.0,
             content: HashMap::new(),
             sel_drag: None,
@@ -483,6 +500,12 @@ impl Kubide {
                 if let Content::Terminal(t) = c {
                     t.set_colors(colors);
                 }
+            }
+            // The pointer wears the theme too, and Windows only re-asks for
+            // it when the mouse moves; without this poke a recolour leaves
+            // the old cursor on screen until the hand twitches.
+            if let Some(hwnd) = self.hwnd {
+                kb_win::refresh_cursor(hwnd);
             }
         }
         if let Some(hwnd) = self.hwnd {
@@ -767,10 +790,35 @@ impl Kubide {
         }
     }
 
+    /// The pane holding the file tree, if one is on screen.
+    fn explorer_pane(&self) -> Option<PaneId> {
+        self.content
+            .iter()
+            .find(|(_, c)| matches!(c, Content::Explorer(_)))
+            .map(|(p, _)| *p)
+    }
+
     /// Opens the explorer in the focused pane, replacing an existing explorer
     /// or viewer but never a running terminal — that would kill a shell.
+    ///
+    /// A tree already on screen is the tree they meant: focus goes there
+    /// rather than a second one being built, which also means the key does
+    /// something when the focused pane is a shell. With no tree anywhere and
+    /// a shell under the cursor there is nothing safe to do, so it says so —
+    /// the same lesson the terminal key already learned about dead keys.
     fn open_explorer(&mut self) -> bool {
+        if let Some(pane) = self.explorer_pane() {
+            self.focus = pane;
+            return true;
+        }
         if matches!(self.content.get(&self.focus), Some(Content::Terminal(_))) {
+            let key = self
+                .cfg
+                .keys
+                .binding_for(kb_cfg::Action::ToggleExplorer)
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "the toggle".to_string());
+            self.warn(&format!("a shell is running here — {key} puts the tree beside it"));
             return false;
         }
         let root = self.root.clone();
@@ -793,7 +841,12 @@ impl Kubide {
                 self.focus = target;
                 return self.close_settings();
             }
-            Some(Content::Terminal(_)) => return false,
+            // Said out loud, like the git panel's refusal: a key that quietly
+            // does nothing reads as a broken key.
+            Some(Content::Terminal(_)) => {
+                self.warn("settings will not replace a running shell — use another pane");
+                return false;
+            }
             _ if self.unsaved_in(target) => {
                 self.warn("unsaved changes there — save first, or use another pane");
                 return false;
@@ -933,6 +986,128 @@ impl Kubide {
         }
     }
 
+    /// The `[cursor]` settings as a concrete pointer. A non-empty `file` —
+    /// a `.cur` or `.ani` from any cursor pack — wins over the drawn shape,
+    /// with the drawing as its fallback; `fallback` itself is the system
+    /// pointer used when custom is off entirely.
+    ///
+    /// The colour string is parsed on every call and the parse is two
+    /// instructions deep — not worth a cache that could go stale on a
+    /// config reload.
+    fn themed_or_file(
+        &self,
+        kind: kb_win::ThemedKind,
+        file: &str,
+        fallback: CursorShape,
+    ) -> CursorShape {
+        let cc = &self.cfg.cursor;
+        if !cc.custom {
+            return fallback;
+        }
+        // A role's own colour when one is set, the shared one otherwise —
+        // and "accent", or anything unparseable, harmlessly follows the
+        // theme.
+        let role_color = match kind {
+            kb_win::ThemedKind::Arrow
+            | kb_win::ThemedKind::Dart
+            | kb_win::ThemedKind::Triangle
+            | kb_win::ThemedKind::Temple
+            // The hand is the pointer's sibling — same dress code.
+            | kb_win::ThemedKind::Hand => cc.pointer_color.as_str(),
+            kb_win::ThemedKind::IBeam | kb_win::ThemedKind::Bar => cc.text_color.as_str(),
+            _ => "",
+        };
+        let spec = if role_color.is_empty() { cc.color.as_str() } else { role_color };
+        let rgb = spec
+            .strip_prefix('#')
+            .and_then(|hex| u32::from_str_radix(hex, 16).ok())
+            .filter(|_| spec.len() == 7)
+            .unwrap_or_else(|| {
+                let c = self.cfg.theme.accent;
+                ((c.r as u32) << 16) | ((c.g as u32) << 8) | c.b as u32
+            });
+        let desc = kb_win::ThemedCursor {
+            kind,
+            size: cc.size.min(128) as u16,
+            rgb,
+        };
+        if file.is_empty() {
+            CursorShape::Themed(desc)
+        } else {
+            CursorShape::File { path: PathBuf::from(file), fallback: desc }
+        }
+    }
+
+    /// Whether an overlay's caret is showing this frame.
+    ///
+    /// Solid for a moment after each keystroke, blinking after that: a caret
+    /// that flickers while you are mid-word is what makes a text box feel
+    /// cheap, and one that never moves does not read as a text box at all.
+    pub(crate) fn caret_on(&self) -> bool {
+        const HOLD: Duration = Duration::from_millis(500);
+        const PHASE: u128 = 530; // the Windows default, near enough
+        let since = self.typed_at.elapsed();
+        since < HOLD || (since.as_millis() / PHASE).is_multiple_of(2)
+    }
+
+    /// Whether the folder picker has something clickable at this point —
+    /// the same regions `picker_click` answers to, asked without clicking.
+    /// This is what turns the pointer into a hand: a row that changes the
+    /// cursor is a row that looks pressable before it is pressed.
+    fn picker_clickable(&self, x: f32, y: f32) -> bool {
+        let Some(h) = &self.picker_hits else { return false };
+        if h.open_btn.contains(x, y)
+            || h.cancel_btn.contains(x, y)
+            || h.back_btn.contains(x, y)
+            || h.fwd_btn.contains(x, y)
+            || h.up_btn.contains(x, y)
+        {
+            return true;
+        }
+        if y >= h.crumb_y.0 && y < h.crumb_y.1 {
+            if h.crumbs.iter().any(|(x0, x1, _)| x >= *x0 && x < *x1) {
+                return true;
+            }
+            // The bar itself opens for typing, so it counts too.
+            if x >= h.addr_x.0 && x < h.addr_x.1 {
+                return true;
+            }
+        }
+        if x >= h.places_x.0 && x < h.places_x.1 && y >= h.places_y0 {
+            let row = ((y - h.places_y0) / h.line_h).floor() as usize;
+            if matches!(h.places.get(row), Some(Some(_))) {
+                return true;
+            }
+        }
+        if x >= h.list_x.0 && x < h.list_x.1 && y >= h.list_y0 {
+            let row = ((y - h.list_y0) / h.line_h).floor() as usize;
+            if row < h.list_count {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// The pointer for text or not-text, in the configured style.
+    fn pointer(&self, over_text: bool) -> CursorShape {
+        let cc = &self.cfg.cursor;
+        if over_text {
+            let kind = match cc.text {
+                kb_cfg::TextPointerStyle::Ibeam => kb_win::ThemedKind::IBeam,
+                kb_cfg::TextPointerStyle::Bar => kb_win::ThemedKind::Bar,
+            };
+            self.themed_or_file(kind, &cc.text_file, CursorShape::Text)
+        } else {
+            let kind = match cc.pointer {
+                kb_cfg::PointerStyle::Arrow => kb_win::ThemedKind::Arrow,
+                kb_cfg::PointerStyle::Dart => kb_win::ThemedKind::Dart,
+                kb_cfg::PointerStyle::Triangle => kb_win::ThemedKind::Triangle,
+                kb_cfg::PointerStyle::Temple => kb_win::ThemedKind::Temple,
+            };
+            self.themed_or_file(kind, &cc.pointer_file, CursorShape::Arrow)
+        }
+    }
+
     /// The line-comment marker for the focused file's language.
     ///
     /// Guessed from the extension, same as highlighting. A wrong marker is
@@ -944,9 +1119,13 @@ impl Kubide {
             _ => None,
         };
         match lang {
-            Some(kb_syn::Lang::Toml) => "#".into(),
-            // Markdown and JSON have no line comment. `//` is what JSON with
-            // comments uses and what people expect to type.
+            Some(
+                kb_syn::Lang::Toml | kb_syn::Lang::Python | kb_syn::Lang::Yaml | kb_syn::Lang::Bash,
+            ) => "#".into(),
+            // Markdown and JSON have no line comment; neither do HTML and
+            // CSS, whose comments are block-only and out of reach for a
+            // line-wise toggle. `//` is what JSON-with-comments uses and what
+            // people expect to type, and a wrong marker toggles back off.
             _ => "//".into(),
         }
     }
@@ -1023,8 +1202,71 @@ impl Kubide {
     /// whatever the footer field is showing.
     fn picker_key(&mut self, vk: u8, ctrl: bool, alt: bool) -> bool {
         let Some(p) = &mut self.folder_picker else { return false };
+        // While the address bar is open it owns the keys: Enter goes to the
+        // typed place, Escape only closes the bar — the dialog under it
+        // survives a mistyped path.
+        self.typed_at = Instant::now();
+        if p.address.is_some() {
+            match vk {
+                0x1B => p.address = None,
+                0x4C if ctrl => p.address = None,
+                // Ctrl+A selects the line, so the next keystroke replaces
+                // the whole path rather than appending to it.
+                0x41 if ctrl => p.select_all = true,
+                0x0D => {
+                    let text = p.address.clone().unwrap_or_default();
+                    let text = text.trim().trim_matches('"').to_string();
+                    let path = std::path::PathBuf::from(&text);
+                    let dest = if path.is_dir() {
+                        Some(path)
+                    } else {
+                        // A file's path means the folder holding it.
+                        path.parent().filter(|q| q.is_dir()).map(Path::to_path_buf)
+                    };
+                    match dest {
+                        Some(d) => p.navigate(d),
+                        // Nowhere: the crumbs come back and say where you
+                        // still are.
+                        None => p.address = None,
+                    }
+                }
+                0x08 => {
+                    if let Some(a) = &mut p.address {
+                        a.pop();
+                    }
+                }
+                0x56 if ctrl => {
+                    p.clear_selected();
+                    if let (Some(a), Some(text)) =
+                        (&mut p.address, kb_win::clipboard::get_text())
+                    {
+                        a.extend(
+                            text.trim().trim_matches('"').chars().filter(|c| !c.is_control()),
+                        );
+                    }
+                }
+                // Unhandled, so WM_CHAR still arrives and types the path.
+                _ => return false,
+            }
+            return true;
+        }
         match vk {
             0x1B => self.folder_picker = None,
+            // Ctrl+L, the browser reflex, and Alt+D, Explorer's own: the
+            // address bar opens for typing with the path filled in.
+            0x4C if ctrl => p.edit_address(),
+            0x44 if alt => p.edit_address(),
+            // Ctrl+A over the search box selects what is in it, so the next
+            // keystroke starts a fresh search instead of extending the old
+            // one. With the box already empty there is nothing to select and
+            // the address bar is the more useful answer to the reflex.
+            0x41 if ctrl => {
+                if p.filter.is_empty() {
+                    p.edit_address();
+                } else {
+                    p.select_all = true;
+                }
+            }
             0x0D if ctrl => {
                 let dir = p.chosen();
                 self.folder_picker = None;
@@ -1034,9 +1276,44 @@ impl Kubide {
             0x26 if alt => p.up(),
             0x25 if alt => p.back(),
             0x27 if alt => p.forward(),
+            // Ctrl+V: a pasted absolute path jumps straight there — Explorer's
+            // address bar takes one, and clicking a way down to AppData
+            // through hidden folders is nobody's idea of an address. A file's
+            // path means the folder holding it; anything that is not a path
+            // lands in the search box like typed text.
+            0x56 if ctrl => {
+                if let Some(text) = kb_win::clipboard::get_text() {
+                    let text = text.trim().trim_matches('"').to_string();
+                    let path = std::path::PathBuf::from(&text);
+                    if path.is_absolute() && path.is_dir() {
+                        p.navigate(path);
+                    } else if path.is_absolute()
+                        && path.parent().is_some_and(|q| q.is_dir())
+                    {
+                        p.navigate(path.parent().unwrap().to_path_buf());
+                    } else {
+                        for c in text.chars().filter(|c| !c.is_control()) {
+                            p.push(c);
+                        }
+                    }
+                }
+            }
+            // Escape hatch for a selected search box: clear it and carry on.
+            0x2E => {
+                p.clear_selected();
+            }
             // Enter, Tab and Right all open the selection: whichever reflex
             // arrives — dialog, shell or tree — the box does what was meant.
-            0x0D | 0x09 | 0x27 => self.picker_activate(),
+            // Unless the search box holds an absolute path, typed or pasted:
+            // then it is an address, and Enter goes there.
+            0x0D | 0x09 | 0x27 => {
+                let typed = std::path::PathBuf::from(p.filter.trim().trim_matches('"'));
+                if typed.is_absolute() && typed.is_dir() {
+                    p.navigate(typed);
+                } else {
+                    self.picker_activate();
+                }
+            }
             0x25 => p.back(),  // left, the browser reflex
             0x26 => p.move_selection(-1),
             0x28 => p.move_selection(1),
@@ -1096,9 +1373,15 @@ impl Kubide {
                 .find(|(x0, x1, _)| x >= *x0 && x < *x1)
             {
                 p.navigate(dir.clone());
+            } else if x >= hits.addr_x.0 && x < hits.addr_x.1 {
+                // The bar itself: open it for typing, like Explorer.
+                p.edit_address();
             }
             return;
         }
+        // A click anywhere else closes an open address bar and then counts
+        // as itself — the same promise Explorer keeps.
+        p.address = None;
         if x >= hits.places_x.0 && x < hits.places_x.1 && y >= hits.places_y0 {
             let row = ((y - hits.places_y0) / hits.line_h).floor() as usize;
             if let Some(Some(dir)) = hits.places.get(row) {
@@ -1261,6 +1544,13 @@ impl Kubide {
     }
 
     fn save_session(&self) {
+        // Before the welcome check, and outside the per-workspace file: a
+        // window someone sized is a window they sized, whatever was in it.
+        if let Some(hwnd) = self.hwnd {
+            if let Some(place) = kb_win::placement(hwnd) {
+                session::note_window_place(place);
+            }
+        }
         // The welcome screen is a doorway, not a layout: remembering it
         // would seed session files for wherever the exe happened to wake up,
         // which is exactly the noise it exists to avoid.
@@ -1721,13 +2011,7 @@ impl Kubide {
     /// zero-width pane is still in the layout, still takes divider hit-tests,
     /// and is impossible to grab again.
     fn toggle_explorer(&mut self) -> bool {
-        let existing = self
-            .content
-            .iter()
-            .find(|(_, c)| matches!(c, Content::Explorer(_)))
-            .map(|(p, _)| *p);
-
-        if let Some(pane) = existing {
+        if let Some(pane) = self.explorer_pane() {
             // Never leave focus on a pane that no longer exists.
             let next = focus_in_dir(&self.layout, pane, Dir::Right)
                 .or_else(|| focus_in_dir(&self.layout, pane, Dir::Down))
@@ -1821,9 +2105,11 @@ impl Kubide {
             (0x28, _) => b.move_vertical(1, extend),
             (0x21, _) => b.move_vertical(-(visible as isize), extend),
             (0x22, _) => b.move_vertical(visible as isize, extend),
-            (0x24, _) => b.move_line_start(extend),
-            (0x23, _) => b.move_line_end(extend),
-            (0x08, _) => {
+            (0x24, false) => b.move_line_start(extend),
+            (0x23, false) => b.move_line_end(extend),
+            (0x24, true) => b.move_doc_start(extend),
+            (0x23, true) => b.move_doc_end(extend),
+            (0x08, false) => {
                 e.status = None;
                 if auto_close {
                     // A pair dies whole when the caret sits inside it.
@@ -1832,9 +2118,17 @@ impl Kubide {
                     b.backspace();
                 }
             }
-            (0x2E, _) => {
+            (0x08, true) => {
+                e.status = None;
+                b.delete_word_left();
+            }
+            (0x2E, false) => {
                 e.status = None;
                 b.delete();
+            }
+            (0x2E, true) => {
+                e.status = None;
+                b.delete_word_right();
             }
             // Tab is handled here rather than in on_char, because Shift+Tab
             // produces no character at all and would otherwise be unreachable.
@@ -2317,6 +2611,8 @@ impl Handler for Kubide {
             // Control characters are chords, not filter text.
             if (c as u32) >= 0x20 {
                 p.push(c);
+                // A caret holds still while a word is being typed.
+                self.typed_at = Instant::now();
             }
             return true;
         }
@@ -2325,6 +2621,7 @@ impl Handler for Kubide {
             // the query would filter answers out of a list of three.
             if p.mode != palette::Mode::Choice && (c as u32) >= 0x20 {
                 p.push(c);
+                self.typed_at = Instant::now();
             }
             return true;
         }
@@ -2540,10 +2837,19 @@ impl Handler for Kubide {
             .values()
             .filter_map(Content::as_terminal)
             .any(|t| t.take_dirty());
-        dirty || git_changed || ticking || remote_done || tree_changed
+
+        // The caret in an open overlay, on the flip only — a blink is two
+        // repaints a second, not sixty.
+        let blink = self.caret_on();
+        let blinked = (self.folder_picker.is_some() || self.palette.is_some())
+            && blink != self.blink_last;
+        self.blink_last = blink;
+
+        dirty || git_changed || ticking || remote_done || tree_changed || blinked
     }
 
     fn on_mouse_move(&mut self, x: f32, y: f32) -> bool {
+        self.mouse = (x, y);
         if let Some((d, lx, ly)) = self.dragging {
             let axis = self
                 .layout
@@ -2574,6 +2880,13 @@ impl Handler for Kubide {
                 }
                 return true;
             }
+        }
+
+        // The picker's rows and buttons light up under the mouse, so while
+        // it is open every move is worth a frame. Only the picker: the rest
+        // of the window repaints on state changes, not on travel.
+        if self.folder_picker.is_some() {
+            return true;
         }
 
         let prev = self.hover_divider;
@@ -2716,11 +3029,52 @@ impl Handler for Kubide {
                 .map(|(_, a, _)| *a)
                 .unwrap_or(Axis::Horizontal)
         });
-        match axis.or(self.hover_divider) {
-            Some(Axis::Horizontal) => CursorShape::SizeWE,
-            Some(Axis::Vertical) => CursorShape::SizeNS,
-            None => CursorShape::Arrow,
+        // The dividers too: a themed window with a stock Windows arrow over
+        // the one thing you drag reads as a seam in the costume.
+        if let Some(axis) = axis.or(self.hover_divider) {
+            let cc = &self.cfg.cursor;
+            return match axis {
+                Axis::Horizontal => self.themed_or_file(
+                    kb_win::ThemedKind::SizeWE,
+                    &cc.resize_we_file.clone(),
+                    CursorShape::SizeWE,
+                ),
+                Axis::Vertical => self.themed_or_file(
+                    kb_win::ThemedKind::SizeNS,
+                    &cc.resize_ns_file.clone(),
+                    CursorShape::SizeNS,
+                ),
+            };
         }
+        // While an overlay is up it owns the mouse. Over the picker's rows
+        // and buttons the pointer becomes a hand — the other half of the
+        // hover highlight's promise that this is a thing you can press.
+        if self.folder_picker.is_some() {
+            let (x, y) = self.mouse;
+            if self.picker_clickable(x, y) {
+                let file = self.cfg.cursor.hand_file.clone();
+                return self.themed_or_file(kb_win::ThemedKind::Hand, &file, CursorShape::Hand);
+            }
+            return self.pointer(false);
+        }
+        if self.palette.is_some() {
+            return self.pointer(false);
+        }
+        // Over the stuff you can type into, the pointer says so. Editors and
+        // terminals both: a shell is a place text goes.
+        let (x, y) = self.mouse;
+        let over_text = self
+            .layout
+            .panes
+            .iter()
+            .find(|(_, r)| r.contains(x, y))
+            .is_some_and(|(p, _)| {
+                matches!(
+                    self.content.get(p),
+                    Some(Content::Editor(_) | Content::Terminal(_))
+                )
+            });
+        self.pointer(over_text)
     }
 
     fn on_key(&mut self, vk: u8, mods: Mods) -> bool {
@@ -2964,6 +3318,23 @@ impl Kubide {
                     e.buffer.duplicate_lines();
                 }
             }
+            DeleteLine => {
+                if let Some(Content::Editor(e)) = self.content.get_mut(&self.focus) {
+                    e.buffer.delete_lines();
+                }
+            }
+            SelectLine => {
+                if let Some(Content::Editor(e)) = self.content.get_mut(&self.focus) {
+                    e.buffer.select_line();
+                }
+            }
+            GoToBracket => {
+                if let Some(Content::Editor(e)) = self.content.get_mut(&self.focus) {
+                    if let Some((_, other)) = e.buffer.matching_bracket() {
+                        e.buffer.move_to(other, false);
+                    }
+                }
+            }
             FocusLeft => {
                 self.move_focus(Dir::Left);
             }
@@ -3178,6 +3549,9 @@ fn main() -> Result<()> {
         title: title_for(&workspace.dir),
         backdrop: backdrop_of(app.cfg.window.backdrop),
         caption_h: app.cfg.window.caption_height as i32,
+        // Opened where it was closed. The default size stays as the answer
+        // for a first run and for a place that no longer exists.
+        place: session::window_place(),
         ..Default::default()
     };
     kb_win::run(window, Box::new(app))

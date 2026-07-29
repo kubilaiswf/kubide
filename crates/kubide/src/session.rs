@@ -66,22 +66,74 @@ fn recent_path() -> Option<PathBuf> {
 pub fn recent_workspaces() -> Vec<PathBuf> {
     let Some(path) = recent_path() else { return Vec::new() };
     let Ok(text) = std::fs::read_to_string(&path) else { return Vec::new() };
-    text.lines()
-        .map(PathBuf::from)
-        .filter(|p| p.is_dir())
-        .take(8)
-        .collect()
+    let mut out: Vec<PathBuf> = Vec::new();
+    for line in text.lines() {
+        // De-armoured on the way in, not only on the way out: a run that
+        // wrote `\\?\C:\...` and a run that wrote `C:\...` meant the same
+        // folder, and the list was offering it twice under one name.
+        let dir = kb_fs::strip_verbatim(PathBuf::from(line));
+        if dir.as_os_str().is_empty() || out.contains(&dir) || !dir.is_dir() {
+            continue;
+        }
+        out.push(dir);
+        if out.len() == 8 {
+            break;
+        }
+    }
+    out
 }
 
 /// Puts `dir` at the top of the recents. Best effort, like everything here.
 pub fn note_workspace(dir: &Path) {
     let Some(path) = recent_path() else { return };
-    let list = bumped(dir, recent_workspaces());
+    // Stored in the one form the list compares in; see `recent_workspaces`.
+    let dir = kb_fs::strip_verbatim(dir.to_path_buf());
+    let list = bumped(&dir, recent_workspaces());
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     let text: String = list.iter().map(|p| format!("{}\n", p.display())).collect();
     let _ = std::fs::write(path, text);
+}
+
+/// Where the window's last size and place is written down.
+///
+/// One file for the whole program, not one per workspace: a window is a
+/// window, and being handed a different size for every project would read as
+/// the editor resizing itself. Plain text for the same reason the recents
+/// are — five numbers do not need a format.
+fn window_path() -> Option<PathBuf> {
+    let base = std::env::var_os("APPDATA").map(PathBuf::from)?;
+    Some(base.join("kubide").join("window"))
+}
+
+/// The size and place the window was left at, if it was ever noted.
+///
+/// Anything unreadable, short or non-numeric is simply no answer: a first run
+/// and a corrupt file should both end up letting Windows choose.
+pub fn window_place() -> Option<kb_win::Placement> {
+    let text = std::fs::read_to_string(window_path()?).ok()?;
+    let n: Vec<i32> = text.split_whitespace().filter_map(|w| w.parse().ok()).collect();
+    let &[x, y, width, height, maximized] = n.as_slice() else { return None };
+    (width > 0 && height > 0).then_some(kb_win::Placement {
+        x,
+        y,
+        width,
+        height,
+        maximized: maximized != 0,
+    })
+}
+
+/// Writes the window's place down. Best effort, like everything here.
+pub fn note_window_place(p: kb_win::Placement) {
+    let Some(path) = window_path() else { return };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(
+        path,
+        format!("{} {} {} {} {}\n", p.x, p.y, p.width, p.height, i32::from(p.maximized)),
+    );
 }
 
 /// `dir` first, the others in their old order, duplicates gone.

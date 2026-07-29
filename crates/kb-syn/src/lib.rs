@@ -88,6 +88,12 @@ const NAMES: &[&str] = &[
     "markup.link.url",
     "markup.quote",
     "markup.list",
+    // Appended rather than sorted in: matching is by longest dotted prefix,
+    // not by position, and appending keeps the diff honest about what the
+    // newer grammars actually needed.
+    "boolean",
+    "character",
+    "string.special.key",
 ];
 
 const KINDS: &[Kind] = &[
@@ -134,6 +140,10 @@ const KINDS: &[Kind] = &[
     Kind::Property,
     Kind::Comment,
     Kind::Punctuation,
+    // boolean, character, string.special.key
+    Kind::Constant,
+    Kind::String,
+    Kind::Property,
 ];
 
 /// Languages we have a grammar for.
@@ -143,6 +153,19 @@ pub enum Lang {
     Json,
     Toml,
     Markdown,
+    Javascript,
+    Typescript,
+    /// Its own grammar, not a flag on TypeScript: TSX changes the parse —
+    /// `<T>` is a type argument in one and an element in the other.
+    Tsx,
+    Python,
+    C,
+    Cpp,
+    Html,
+    Css,
+    Yaml,
+    Bash,
+    Go,
 }
 
 impl Lang {
@@ -157,16 +180,72 @@ impl Lang {
             "json" => Lang::Json,
             "toml" => Lang::Toml,
             "md" | "markdown" => Lang::Markdown,
+            // .jsx is the JavaScript grammar too: it parses JSX natively.
+            "js" | "mjs" | "cjs" | "jsx" => Lang::Javascript,
+            "ts" | "mts" | "cts" => Lang::Typescript,
+            "tsx" => Lang::Tsx,
+            "py" | "pyi" => Lang::Python,
+            // .h is C here. It is often C++, but the C grammar degrades
+            // gracefully on C++ headers; the reverse guess colours plain C
+            // with a parser expecting classes.
+            "c" | "h" => Lang::C,
+            "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" => Lang::Cpp,
+            "html" | "htm" => Lang::Html,
+            "css" => Lang::Css,
+            "yaml" | "yml" => Lang::Yaml,
+            "sh" | "bash" | "zsh" => Lang::Bash,
+            "go" => Lang::Go,
             _ => return None,
         })
+    }
+
+    /// The canonical name, which is also the key an injection resolves: a
+    /// markdown fence saying ```rust and an HTML `<script>` both reach their
+    /// grammar through this string.
+    fn name(self) -> &'static str {
+        match self {
+            Lang::Rust => "rust",
+            Lang::Json => "json",
+            Lang::Toml => "toml",
+            Lang::Markdown => "markdown",
+            Lang::Javascript => "javascript",
+            Lang::Typescript => "typescript",
+            Lang::Tsx => "tsx",
+            Lang::Python => "python",
+            Lang::C => "c",
+            Lang::Cpp => "cpp",
+            Lang::Html => "html",
+            Lang::Css => "css",
+            Lang::Yaml => "yaml",
+            Lang::Bash => "bash",
+            Lang::Go => "go",
+        }
+    }
+}
+
+/// What a free-text injection name means. Fence info strings are whatever the
+/// author typed — `js`, `shell`, `c++` — and refusing the common spellings
+/// would colour fences only for people who write like our `Lang::name`.
+fn canonical(name: &str) -> &str {
+    match name {
+        "js" | "mjs" | "cjs" | "jsx" | "node" => "javascript",
+        "ts" => "typescript",
+        "py" | "python3" => "python",
+        "c++" => "cpp",
+        "yml" => "yaml",
+        "sh" | "shell" | "zsh" | "console" => "bash",
+        "golang" => "go",
+        "rs" => "rust",
+        _ => name,
     }
 }
 
 pub struct Syntax {
-    configs: HashMap<Lang, HighlightConfiguration>,
-    /// Grammars reached only through an injection, keyed by the name the
-    /// injecting query uses.
-    injected: HashMap<String, HighlightConfiguration>,
+    /// Every loaded grammar, keyed by canonical name. One map rather than a
+    /// per-language one plus an "injected" one: an injection is just a name,
+    /// and a fence saying ```python deserves the same colours a .py file
+    /// gets. `markdown_inline` sits here too, reachable only by injection.
+    configs: HashMap<&'static str, HighlightConfiguration>,
 }
 
 impl Default for Syntax {
@@ -178,18 +257,17 @@ impl Default for Syntax {
 impl Syntax {
     pub fn new() -> Self {
         let mut configs = HashMap::new();
-        let mut injected = HashMap::new();
         // A grammar that fails to load is skipped rather than fatal: losing
         // colours for one language must not stop the editor from opening.
-        let mut add = |lang: Lang, cfg: Result<HighlightConfiguration, _>| {
+        let mut add = |name: &'static str, cfg: Result<HighlightConfiguration, _>| {
             if let Ok(mut cfg) = cfg {
                 cfg.configure(NAMES);
-                configs.insert(lang, cfg);
+                configs.insert(name, cfg);
             }
         };
 
         add(
-            Lang::Rust,
+            "rust",
             HighlightConfiguration::new(
                 tree_sitter_rust::LANGUAGE.into(),
                 "rust",
@@ -199,7 +277,7 @@ impl Syntax {
             ),
         );
         add(
-            Lang::Json,
+            "json",
             HighlightConfiguration::new(
                 tree_sitter_json::LANGUAGE.into(),
                 "json",
@@ -209,7 +287,7 @@ impl Syntax {
             ),
         );
         add(
-            Lang::Toml,
+            "toml",
             HighlightConfiguration::new(
                 tree_sitter_toml_ng::LANGUAGE.into(),
                 "toml",
@@ -219,12 +297,154 @@ impl Syntax {
             ),
         );
         add(
-            Lang::Markdown,
+            "markdown",
             HighlightConfiguration::new(
                 tree_sitter_md::LANGUAGE.into(),
                 "markdown",
                 tree_sitter_md::HIGHLIGHT_QUERY_BLOCK,
                 tree_sitter_md::INJECTION_QUERY_BLOCK,
+                "",
+            ),
+        );
+        // The JSX query rides along for plain JavaScript too: the grammar
+        // always knows the JSX nodes, and a .js file full of React is more
+        // common than one that would mind.
+        let js_highlights = format!(
+            "{}{}",
+            tree_sitter_javascript::HIGHLIGHT_QUERY,
+            tree_sitter_javascript::JSX_HIGHLIGHT_QUERY
+        );
+        add(
+            "javascript",
+            HighlightConfiguration::new(
+                tree_sitter_javascript::LANGUAGE.into(),
+                "javascript",
+                &js_highlights,
+                tree_sitter_javascript::INJECTIONS_QUERY,
+                tree_sitter_javascript::LOCALS_QUERY,
+            ),
+        );
+        // TypeScript's query only adds what TypeScript adds; the JavaScript
+        // query underneath it is how the whole language gets coloured. The
+        // upstream queries are written to be concatenated this way.
+        let ts_highlights = format!(
+            "{}{}",
+            tree_sitter_javascript::HIGHLIGHT_QUERY,
+            tree_sitter_typescript::HIGHLIGHTS_QUERY
+        );
+        let ts_locals = format!(
+            "{}{}",
+            tree_sitter_javascript::LOCALS_QUERY,
+            tree_sitter_typescript::LOCALS_QUERY
+        );
+        add(
+            "typescript",
+            HighlightConfiguration::new(
+                tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+                "typescript",
+                &ts_highlights,
+                "",
+                &ts_locals,
+            ),
+        );
+        let tsx_highlights = format!(
+            "{}{}{}",
+            tree_sitter_javascript::HIGHLIGHT_QUERY,
+            tree_sitter_javascript::JSX_HIGHLIGHT_QUERY,
+            tree_sitter_typescript::HIGHLIGHTS_QUERY
+        );
+        add(
+            "tsx",
+            HighlightConfiguration::new(
+                tree_sitter_typescript::LANGUAGE_TSX.into(),
+                "tsx",
+                &tsx_highlights,
+                "",
+                &ts_locals,
+            ),
+        );
+        add(
+            "python",
+            HighlightConfiguration::new(
+                tree_sitter_python::LANGUAGE.into(),
+                "python",
+                tree_sitter_python::HIGHLIGHTS_QUERY,
+                "",
+                "",
+            ),
+        );
+        add(
+            "c",
+            HighlightConfiguration::new(
+                tree_sitter_c::LANGUAGE.into(),
+                "c",
+                tree_sitter_c::HIGHLIGHT_QUERY,
+                "",
+                "",
+            ),
+        );
+        // Same concatenation trick as TypeScript: C++'s query inherits C's.
+        let cpp_highlights =
+            format!("{}{}", tree_sitter_c::HIGHLIGHT_QUERY, tree_sitter_cpp::HIGHLIGHT_QUERY);
+        add(
+            "cpp",
+            HighlightConfiguration::new(
+                tree_sitter_cpp::LANGUAGE.into(),
+                "cpp",
+                &cpp_highlights,
+                "",
+                "",
+            ),
+        );
+        // HTML's injection query is what colours <script> and <style>: it
+        // asks for "javascript" and "css" by name, and both live in this map.
+        add(
+            "html",
+            HighlightConfiguration::new(
+                tree_sitter_html::LANGUAGE.into(),
+                "html",
+                tree_sitter_html::HIGHLIGHTS_QUERY,
+                tree_sitter_html::INJECTIONS_QUERY,
+                "",
+            ),
+        );
+        add(
+            "css",
+            HighlightConfiguration::new(
+                tree_sitter_css::LANGUAGE.into(),
+                "css",
+                tree_sitter_css::HIGHLIGHTS_QUERY,
+                "",
+                "",
+            ),
+        );
+        add(
+            "yaml",
+            HighlightConfiguration::new(
+                tree_sitter_yaml::LANGUAGE.into(),
+                "yaml",
+                tree_sitter_yaml::HIGHLIGHTS_QUERY,
+                "",
+                "",
+            ),
+        );
+        add(
+            "bash",
+            HighlightConfiguration::new(
+                tree_sitter_bash::LANGUAGE.into(),
+                "bash",
+                tree_sitter_bash::HIGHLIGHT_QUERY,
+                "",
+                "",
+            ),
+        );
+        add(
+            "go",
+            HighlightConfiguration::new(
+                tree_sitter_go::LANGUAGE.into(),
+                "go",
+                tree_sitter_go::HIGHLIGHTS_QUERY,
+                "",
                 "",
             ),
         );
@@ -235,22 +455,22 @@ impl Syntax {
         // reach it — it only injects fenced code blocks. Without running the
         // inline parser as well, markdown looks supported and colours almost
         // nothing.
-        if let Ok(mut inline) = HighlightConfiguration::new(
-            tree_sitter_md::INLINE_LANGUAGE.into(),
+        add(
             "markdown_inline",
-            tree_sitter_md::HIGHLIGHT_QUERY_INLINE,
-            "",
-            "",
-        ) {
-            inline.configure(NAMES);
-            injected.insert("markdown_inline".to_string(), inline);
-        }
+            HighlightConfiguration::new(
+                tree_sitter_md::INLINE_LANGUAGE.into(),
+                "markdown_inline",
+                tree_sitter_md::HIGHLIGHT_QUERY_INLINE,
+                "",
+                "",
+            ),
+        );
 
-        Self { configs, injected }
+        Self { configs }
     }
 
     pub fn supports(&self, lang: Lang) -> bool {
-        self.configs.contains_key(&lang)
+        self.configs.contains_key(lang.name())
     }
 
     /// Highlights a whole file into per-line spans.
@@ -260,14 +480,14 @@ impl Syntax {
     /// coloured file after a syntax error is normal and fine; tree-sitter
     /// recovers and keeps going.
     pub fn highlight(&self, lang: Lang, source: &str) -> Vec<Vec<Span>> {
-        let Some(config) = self.configs.get(&lang) else {
+        let Some(config) = self.configs.get(lang.name()) else {
             return Vec::new();
         };
         let mut highlighter = Highlighter::new();
-        let injected = &self.injected;
-        let Ok(events) =
-            highlighter.highlight(config, source.as_bytes(), None, |name| injected.get(name))
-        else {
+        let configs = &self.configs;
+        let Ok(events) = highlighter.highlight(config, source.as_bytes(), None, |name| {
+            configs.get(canonical(name))
+        }) else {
             return Vec::new();
         };
 
@@ -277,7 +497,7 @@ impl Syntax {
         // spans are merged only where the first pass left a gap, so a fenced
         // code block stays code rather than being reinterpreted as prose.
         let extra = match lang {
-            Lang::Markdown => self.injected.get("markdown_inline"),
+            Lang::Markdown => self.configs.get("markdown_inline"),
             _ => None,
         };
         // tree-sitter nests highlights, so this is a stack: the innermost one
@@ -433,7 +653,23 @@ mod tests {
         // A grammar that fails to load is skipped silently by design, so
         // without this test a broken one would just mean "no colours".
         let s = Syntax::new();
-        for lang in [Lang::Rust, Lang::Json, Lang::Toml, Lang::Markdown] {
+        for lang in [
+            Lang::Rust,
+            Lang::Json,
+            Lang::Toml,
+            Lang::Markdown,
+            Lang::Javascript,
+            Lang::Typescript,
+            Lang::Tsx,
+            Lang::Python,
+            Lang::C,
+            Lang::Cpp,
+            Lang::Html,
+            Lang::Css,
+            Lang::Yaml,
+            Lang::Bash,
+            Lang::Go,
+        ] {
             assert!(s.supports(lang), "{lang:?} grammar did not load");
         }
     }
@@ -509,8 +745,82 @@ mod tests {
         assert_eq!(Lang::of(Path::new("a/b/main.rs")), Some(Lang::Rust));
         assert_eq!(Lang::of(Path::new("Cargo.toml")), Some(Lang::Toml));
         assert_eq!(Lang::of(Path::new("README.MD")), Some(Lang::Markdown));
+        assert_eq!(Lang::of(Path::new("app.jsx")), Some(Lang::Javascript));
+        assert_eq!(Lang::of(Path::new("app.ts")), Some(Lang::Typescript));
+        assert_eq!(Lang::of(Path::new("app.tsx")), Some(Lang::Tsx));
+        assert_eq!(Lang::of(Path::new("tool.py")), Some(Lang::Python));
+        assert_eq!(Lang::of(Path::new("lib.h")), Some(Lang::C));
+        assert_eq!(Lang::of(Path::new("lib.hpp")), Some(Lang::Cpp));
+        assert_eq!(Lang::of(Path::new("index.html")), Some(Lang::Html));
+        assert_eq!(Lang::of(Path::new("style.css")), Some(Lang::Css));
+        assert_eq!(Lang::of(Path::new("ci.yml")), Some(Lang::Yaml));
+        assert_eq!(Lang::of(Path::new("run.sh")), Some(Lang::Bash));
+        assert_eq!(Lang::of(Path::new("main.go")), Some(Lang::Go));
         assert_eq!(Lang::of(Path::new("notes.txt")), None);
         assert_eq!(Lang::of(Path::new("Makefile")), None);
+    }
+
+    #[test]
+    fn every_language_colours_its_hello_world() {
+        // One representative snippet per grammar. Not asserting specific
+        // colours — queries differ on those — just that each grammar wired up
+        // here actually produces spans, because a grammar that loads and
+        // colours nothing looks exactly like a supported language.
+        let cases: &[(Lang, &str)] = &[
+            (Lang::Javascript, "function f(x) { return `hi ${x}`; } // c\n"),
+            (Lang::Typescript, "const n: number = 1;\ninterface A { b: string }\n"),
+            (Lang::Tsx, "const el = <div className={x}>hi</div>;\n"),
+            (Lang::Python, "def f(x):\n    return f\"hi {x}\"  # c\n"),
+            (Lang::C, "int main(void) { return 0; } /* c */\n"),
+            (Lang::Cpp, "class A { public: int f() const; };\n"),
+            (Lang::Html, "<html><body class=\"x\"><p>hi</p></body></html>\n"),
+            (Lang::Css, ".a { color: #fff; margin: 0 auto; }\n"),
+            (Lang::Yaml, "key: value\nlist:\n  - true\n"),
+            (Lang::Bash, "for f in *.rs; do echo \"$f\"; done # c\n"),
+            (Lang::Go, "func main() {\n\tfmt.Println(\"hi\")\n}\n"),
+        ];
+        let s = Syntax::new();
+        for (lang, src) in cases {
+            let total: usize = s.highlight(*lang, src).iter().map(Vec::len).sum();
+            assert!(total > 0, "{lang:?} produced no spans for {src:?}");
+        }
+    }
+
+    #[test]
+    fn keywords_come_out_where_it_matters() {
+        let s = Syntax::new();
+        let js = s.highlight(Lang::Javascript, "function f() { return 1; }\n");
+        assert!(js[0].iter().any(|x| x.kind == Kind::Keyword), "function/return");
+        let py = s.highlight(Lang::Python, "def f():\n    return 'x'\n");
+        assert!(py[0].iter().any(|x| x.kind == Kind::Keyword), "def");
+        assert!(py[1].iter().any(|x| x.kind == Kind::String), "'x'");
+    }
+
+    #[test]
+    fn a_markdown_fence_reaches_the_real_grammar() {
+        // The fence's info string is an injection name, and the injection map
+        // is the same map the languages live in — ```rust colours like a .rs
+        // file, aliases included.
+        let s = Syntax::new();
+        for fence in ["rust", "rs", "python", "py", "js"] {
+            let src = format!("# T\n\n```{fence}\n# not a heading\nfn f() {{ return 0 }}\n```\n");
+            let lines = s.highlight(Lang::Markdown, &src);
+            let inside: Vec<Kind> = lines[3..5].iter().flatten().map(|x| x.kind).collect();
+            assert!(
+                inside.contains(&Kind::Keyword) || inside.contains(&Kind::Comment),
+                "```{fence} was not injected: {inside:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn html_style_and_script_blocks_get_their_own_colours() {
+        let s = Syntax::new();
+        let src = "<style>.a { color: red; }</style>\n<script>const x = 1;</script>\n";
+        let lines = s.highlight(Lang::Html, src);
+        let all: Vec<Kind> = lines.iter().flatten().map(|x| x.kind).collect();
+        assert!(all.contains(&Kind::Keyword), "const inside <script>");
+        assert!(all.contains(&Kind::Property), "color inside <style>");
     }
 
     #[test]

@@ -1,0 +1,66 @@
+# Aurora for kubide.
+#
+# From colorhunt.co's 212121 / 323232 / 0D7377 / 14FFEC — flat charcoal
+# with a single vein of glowing mint. The darkest theme here: the
+# background gives nothing, so the mint reads like light.
+
+fg = "#e8e8e8"        # main text
+dim = "#848d8c"       # labels, hints, line numbers
+accent = "#14ffec"    # focus, selection, highlights
+warning = "#ffd166"
+error = "#f25f5c"
+divider = "#e8e8e81a" # pane hairline — mostly transparent on purpose
+overlay = "#212121f2" # the command palette's backdrop
+
+[caption]
+fg = "#848d8c"
+icon = "#e8e8e8"
+hover = "#ffffff17"
+press = "#ffffff0d"
+close_hover = "#f25f5cd9"
+close_press = "#c94643e6"
+
+[terminal]
+background = "#212121" # cells of exactly this colour stay transparent
+foreground = "#e8e8e8"
+cursor = "#14ffecbf"
+selection = "#0d7377"
+
+[terminal.ansi]
+black = "#212121"
+red = "#f25f5c"
+green = "#70d68a"
+yellow = "#ffd166"
+blue = "#4d9de0"
+magenta = "#b487e0"
+cyan = "#0d7377"
+white = "#c4c9c8"
+bright_black = "#525a59"
+bright_red = "#ff8482"
+bright_green = "#93edaa"
+bright_yellow = "#ffe08a"
+bright_blue = "#78bbf0"
+bright_magenta = "#cfa6f2"
+bright_cyan = "#14ffec"
+bright_white = "#f5f5f5"
+
+[git]
+modified = "#ffd166"
+added = "#70d68a"
+deleted = "#f25f5c"
+untracked = "#14ffec"
+conflicted = "#b487e0"
+
+[syntax]
+keyword = "#14ffec"
+function = "#78e0d5"
+type = "#ffd166"
+string = "#93edaa"
+number = "#cfa6f2"
+comment = "#525a59"
+constant = "#cfa6f2"
+operator = "#e8e8e8"
+punctuation = "#848d8c"
+variable = "#e8e8e8"
+property = "#8fc9c4"
+attribute = "#ffa15c"

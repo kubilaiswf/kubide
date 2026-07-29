@@ -10,10 +10,12 @@ Working notes. Roughly ordered by how much they'd change day-to-day use.
   undo step, same smart-case literal match as Find. Still missing: stepping
   through matches one at a time, regex, and replacing with an empty string
   (an empty prompt answer means cancel).
-- **Auto-close exists; matching does not.** `(` brings `)`, closers step
+- **Auto-close and bracket matching exist.** `(` brings `)`, closers step
   over themselves, backspace inside a pair takes both, a selection wraps —
-  all behind `[editor] auto_close`. Still missing: highlighting the matching
-  bracket under the caret.
+  all behind `[editor] auto_close` — and the pair the caret touches is
+  highlighted, and Ctrl+M jumps between the two. The match is textual, so a
+  bracket inside a string counts; knowing better needs the syntax tree.
+  Still missing: an unmatched-bracket colour.
 - **Snippets exist** (`[editor] snippets`): trigger word + Tab, per file
   extension, from `%APPDATA%\kubide\snippets\<ext>.toml`, seeded with
   starters. `$0` marks the caret. Missing: multiple placeholders with
@@ -22,6 +24,15 @@ Working notes. Roughly ordered by how much they'd change day-to-day use.
   are built on one-line-one-row. Changing that is a real piece of work, not a
   flag.
 - **Undo history is per session.** Closing a file loses it.
+- **Highlighting covers 15 grammars** (Rust, JS/TS/JSX/TSX, Python, C, C++,
+  Go, HTML, CSS, JSON, TOML, YAML, Bash, Markdown block + inline), and an
+  injection resolves through the same table — markdown fences and HTML
+  `<script>`/`<style>` colour as their real language, common fence aliases
+  (`py`, `js`, `sh`, `c++`) included. Notes: `.h` is guessed as C, which is
+  wrong for C++-only headers but degrades better than the reverse; all
+  grammars load at startup (tens of ms) rather than lazily; no Java, C#,
+  Lua, Ruby, PHP — add a grammar crate and two match arms when one is
+  actually missed.
 
 ## Panes and files
 
@@ -64,15 +75,22 @@ The point is to never need the mouse.
 
 **Theme files exist.** `theme = "gruvbox"` in the config loads
 `%APPDATA%\kubide\themes\gruvbox.toml`; the folder is seeded on first start
-with the built-ins (gruvbox, catppuccin, tokyonight, nord, rose-pine), a
-dropped file wins over its built-in namesake, and the active theme file is
-watched — recolour, save, see it, no restart. The settings screen writes the
-name back rather than the resolved colours, so the config keeps following
-the theme.
+with the built-ins, a dropped file wins over its built-in namesake, and the
+active theme file is watched — recolour, save, see it, no restart. The
+settings screen writes the name back rather than the resolved colours, so
+the config keeps following the theme.
+
+Seventeen ship built in: the five ports (gruvbox, catppuccin, tokyonight,
+nord, rose-pine) and twelve grown from colorhunt.co's most liked palettes
+(midnight-teal, deep-ocean, neon-sushi, steel, coral-reef, desert-night,
+moss, mulberry, harbor, aurora, evergreen, paper). Those twelve extrapolate
+a four-colour palette into ANSI and syntax colours — judged by eye against
+the parse test, not on screen per language, so a colour that reads badly in
+anger is a one-line fix in its file.
 
 Still wanted: a theme picker on the settings screen (left/right through
-whatever the folder holds), and a light theme that actually works over a
-bright wallpaper — see "Measurements never taken".
+whatever the folder holds), and a light theme *proven* over a bright
+wallpaper — `paper` exists now, but see "Measurements never taken".
 
 ## Measurements never taken
 

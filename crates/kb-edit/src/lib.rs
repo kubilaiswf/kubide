@@ -682,6 +682,62 @@ impl Buffer {
         self.replace(start, end, "", Kind::Delete);
     }
 
+    /// Ctrl+Backspace: takes the word the caret just crossed, in one bite.
+    ///
+    /// The span is exactly what a word-left movement would cross, so deleting
+    /// and moving agree about where a word starts — two different answers
+    /// there would make the key feel haunted. At the start of a line it
+    /// degrades to a plain backspace, which joins lines; eating the previous
+    /// line's last word from around the corner would be a surprise.
+    pub fn delete_word_left(&mut self) {
+        if self.selection().is_some() || self.cursor.col == 0 {
+            self.backspace();
+            return;
+        }
+        let start = Pos::new(self.cursor.line, self.word_left_col(self.cursor));
+        self.replace(start, self.cursor, "", Kind::Delete);
+    }
+
+    /// Ctrl+Delete: the mirror of [`Self::delete_word_left`].
+    pub fn delete_word_right(&mut self) {
+        if self.selection().is_some() || self.cursor.col >= self.line_chars(self.cursor.line) {
+            self.delete();
+            return;
+        }
+        let end = Pos::new(self.cursor.line, self.word_right_col(self.cursor));
+        self.replace(self.cursor, end, "", Kind::Delete);
+    }
+
+    /// Deletes the lines the selection touches, newline included, as one undo
+    /// step. The caret keeps its column, which is what makes holding the key
+    /// eat lines without drifting left.
+    pub fn delete_lines(&mut self) {
+        let cursor = self.cursor;
+        let (start, end) = self.selection().unwrap_or((self.cursor, self.cursor));
+        let (first, last) = (start.line, end.line);
+        self.break_undo_group();
+        if last + 1 < self.lines.len() {
+            // The trailing newline goes with the lines, so the next line
+            // moves up rather than leaving a blank behind.
+            self.replace(Pos::new(first, 0), Pos::new(last + 1, 0), "", Kind::Other);
+        } else if first > 0 {
+            // The buffer's tail: the newline *before* the block is the one
+            // that has to go, or the file grows a blank last line.
+            let col = self.line_chars(first - 1);
+            self.replace(
+                Pos::new(first - 1, col),
+                Pos::new(last, self.line_chars(last)),
+                "",
+                Kind::Other,
+            );
+        } else {
+            // Every line at once. One empty line is as empty as it gets.
+            self.replace(Pos::new(0, 0), Pos::new(last, self.line_chars(last)), "", Kind::Other);
+        }
+        self.break_undo_group();
+        self.cursor = self.clamp(Pos::new(first, cursor.col));
+    }
+
     /// Forward delete.
     pub fn delete(&mut self) {
         if let Some((start, end)) = self.selection() {
@@ -842,12 +898,15 @@ impl Buffer {
         self.goal_col = None;
     }
 
-    pub fn move_word_left(&mut self, extend: bool) {
-        let chars: Vec<char> = self.line(self.cursor.line).chars().collect();
-        let mut col = self.cursor.col;
+    /// The column a word-left step from `p` lands on, within `p`'s line.
+    ///
+    /// One definition of "a word back", shared by movement and deletion:
+    /// two different answers there would make Ctrl+Backspace feel haunted.
+    fn word_left_col(&self, p: Pos) -> usize {
+        let chars: Vec<char> = self.line(p.line).chars().collect();
+        let mut col = p.col;
         if col == 0 {
-            self.move_left(extend);
-            return;
+            return 0;
         }
         col -= 1;
         while col > 0 && chars[col].is_whitespace() {
@@ -857,16 +916,15 @@ impl Buffer {
         while col > 0 && is_word(chars[col - 1]) == word && !chars[col - 1].is_whitespace() {
             col -= 1;
         }
-        self.move_to(Pos::new(self.cursor.line, col), extend);
-        self.goal_col = None;
+        col
     }
 
-    pub fn move_word_right(&mut self, extend: bool) {
-        let chars: Vec<char> = self.line(self.cursor.line).chars().collect();
-        let mut col = self.cursor.col;
+    /// The column a word-right step from `p` lands on, within `p`'s line.
+    fn word_right_col(&self, p: Pos) -> usize {
+        let chars: Vec<char> = self.line(p.line).chars().collect();
+        let mut col = p.col;
         if col >= chars.len() {
-            self.move_right(extend);
-            return;
+            return col;
         }
         let word = is_word(chars[col]);
         while col < chars.len() && is_word(chars[col]) == word && !chars[col].is_whitespace() {
@@ -875,14 +933,145 @@ impl Buffer {
         while col < chars.len() && chars[col].is_whitespace() {
             col += 1;
         }
+        col
+    }
+
+    pub fn move_word_left(&mut self, extend: bool) {
+        if self.cursor.col == 0 {
+            self.move_left(extend);
+            return;
+        }
+        let col = self.word_left_col(self.cursor);
         self.move_to(Pos::new(self.cursor.line, col), extend);
         self.goal_col = None;
+    }
+
+    pub fn move_word_right(&mut self, extend: bool) {
+        if self.cursor.col >= self.line_chars(self.cursor.line) {
+            self.move_right(extend);
+            return;
+        }
+        let col = self.word_right_col(self.cursor);
+        self.move_to(Pos::new(self.cursor.line, col), extend);
+        self.goal_col = None;
+    }
+
+    /// Ctrl+Home.
+    pub fn move_doc_start(&mut self, extend: bool) {
+        self.move_to(Pos::new(0, 0), extend);
+        self.goal_col = None;
+    }
+
+    /// Ctrl+End.
+    pub fn move_doc_end(&mut self, extend: bool) {
+        let last = self.lines.len() - 1;
+        self.move_to(Pos::new(last, self.line_chars(last)), extend);
+        self.goal_col = None;
+    }
+
+    /// The bracket pair the caret is touching, if both halves exist.
+    ///
+    /// "Touching" means the character at the caret or the one just before it —
+    /// the caret sits between characters, and `(|` and `|)` both read as
+    /// standing at a bracket. The one at the caret wins when both are
+    /// brackets, matching how typing a closer steps over it.
+    ///
+    /// Purely textual: a bracket inside a string literal counts. Knowing
+    /// better needs the syntax tree, which lives a crate away on purpose —
+    /// and the textual answer is right so often that waiting for a perfect
+    /// one would mean shipping nothing.
+    ///
+    /// Quotes are excluded: an apostrophe cannot say whether it opens or
+    /// closes, and a guess drawn on screen is worse than silence.
+    pub fn matching_bracket(&self) -> Option<(Pos, Pos)> {
+        let before = (self.cursor.col > 0)
+            .then(|| Pos::new(self.cursor.line, self.cursor.col - 1));
+        let candidates = [Some(self.cursor), before];
+        for pos in candidates.into_iter().flatten() {
+            let Some(c) = self.line(pos.line).chars().nth(pos.col) else { continue };
+            let found = match c {
+                '(' | '[' | '{' => self.scan_forward(pos, c),
+                ')' | ']' | '}' => self.scan_backward(pos, c),
+                _ => None,
+            };
+            if let Some(other) = found {
+                return Some((pos, other));
+            }
+        }
+        None
+    }
+
+    /// Finds the closer matching the opener at `from`, scanning forward.
+    ///
+    /// Both scans stop after a fixed number of characters rather than running
+    /// to the end of the buffer: this is called every frame the caret sits on
+    /// a bracket, and an unmatched `{` at the top of a huge file must not
+    /// turn each repaint into a full-file walk.
+    fn scan_forward(&self, from: Pos, open: char) -> Option<Pos> {
+        let close = closer_of(open)?;
+        let mut depth = 0usize;
+        let mut budget = 100_000usize;
+        for line in from.line..self.lines.len() {
+            let skip = if line == from.line { from.col + 1 } else { 0 };
+            for (col, c) in self.line(line).chars().enumerate().skip(skip) {
+                budget = budget.checked_sub(1)?;
+                if c == open {
+                    depth += 1;
+                } else if c == close {
+                    if depth == 0 {
+                        return Some(Pos::new(line, col));
+                    }
+                    depth -= 1;
+                }
+            }
+        }
+        None
+    }
+
+    /// Finds the opener matching the closer at `from`, scanning backward.
+    fn scan_backward(&self, from: Pos, close: char) -> Option<Pos> {
+        let open = opener_of(close)?;
+        let mut depth = 0usize;
+        let mut budget = 100_000usize;
+        for line in (0..=from.line).rev() {
+            let chars: Vec<char> = self.line(line).chars().collect();
+            let end = if line == from.line { from.col } else { chars.len() };
+            for col in (0..end).rev() {
+                budget = budget.checked_sub(1)?;
+                let c = chars[col];
+                if c == close {
+                    depth += 1;
+                } else if c == open {
+                    if depth == 0 {
+                        return Some(Pos::new(line, col));
+                    }
+                    depth -= 1;
+                }
+            }
+        }
+        None
     }
 
     pub fn select_all(&mut self) {
         let last = self.lines.len() - 1;
         self.anchor = Some(Pos::new(0, 0));
         self.cursor = Pos::new(last, self.line_chars(last));
+    }
+
+    /// Selects the caret's line whole, newline included; pressing again grows
+    /// the selection a line at a time. Line-wise on both ends, whatever shape
+    /// the selection had before — half a first line in a "select lines"
+    /// selection is a shape nobody asks for by name.
+    pub fn select_line(&mut self) {
+        let (start, end) = self.selection().unwrap_or((self.cursor, self.cursor));
+        self.anchor = Some(Pos::new(start.line, 0));
+        self.cursor = if end.line + 1 < self.lines.len() {
+            Pos::new(end.line + 1, 0)
+        } else {
+            Pos::new(end.line, self.line_chars(end.line))
+        };
+        self.goal_col = None;
+        self.break_undo_group();
     }
 }
 
@@ -904,6 +1093,18 @@ fn advance(at: Pos, text: &str) -> Pos {
 
 fn is_word(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
+}
+
+/// The opening half of a bracket pair, if `c` closes one. Quotes are absent
+/// on purpose: they close themselves, and "which way does this one face" has
+/// no textual answer.
+fn opener_of(c: char) -> Option<char> {
+    Some(match c {
+        ')' => '(',
+        ']' => '[',
+        '}' => '{',
+        _ => return None,
+    })
 }
 
 /// The closing half of an auto-typed pair, if `c` opens one.
@@ -1531,6 +1732,149 @@ c");
         b.expand_snippet(4, "fn main() {\n    $0\n}");
         assert_eq!(b.lines(), ["    fn main() {", "        ", "    }"]);
         assert_eq!(b.cursor, Pos::new(1, 8));
+    }
+
+    #[test]
+    fn ctrl_backspace_takes_the_word_movement_would_cross() {
+        // Deleting and moving must agree about where a word starts.
+        let mut b = buf("foo bar_baz");
+        b.move_line_end(false);
+        b.delete_word_left();
+        assert_eq!(b.line(0), "foo ");
+        b.delete_word_left();
+        assert_eq!(b.line(0), "");
+    }
+
+    #[test]
+    fn ctrl_backspace_at_a_line_start_joins_lines() {
+        // Not "eat the previous line's last word from around the corner".
+        let mut b = buf("one\ntwo");
+        b.move_to(Pos::new(1, 0), false);
+        b.delete_word_left();
+        assert_eq!(b.lines(), ["onetwo"]);
+    }
+
+    #[test]
+    fn ctrl_delete_mirrors_it() {
+        let mut b = buf("foo  bar");
+        b.move_to(Pos::new(0, 0), false);
+        b.delete_word_right();
+        assert_eq!(b.line(0), "bar", "the word and the spaces after it");
+    }
+
+    #[test]
+    fn word_deletion_with_a_selection_just_takes_the_selection() {
+        let mut b = buf("hello world");
+        b.move_to(Pos::new(0, 0), false);
+        b.move_to(Pos::new(0, 5), true);
+        b.delete_word_left();
+        assert_eq!(b.line(0), " world");
+    }
+
+    #[test]
+    fn delete_line_takes_its_newline_with_it() {
+        let mut b = buf("a\nbb\nc");
+        b.move_to(Pos::new(1, 1), false);
+        b.delete_lines();
+        assert_eq!(b.lines(), ["a", "c"]);
+        assert_eq!(b.cursor, Pos::new(1, 1), "the caret keeps its column");
+    }
+
+    #[test]
+    fn deleting_the_last_line_takes_the_newline_before_it() {
+        // Otherwise the file grows a blank last line out of nowhere.
+        let mut b = buf("a\nb");
+        b.move_to(Pos::new(1, 0), false);
+        b.delete_lines();
+        assert_eq!(b.lines(), ["a"]);
+    }
+
+    #[test]
+    fn deleting_every_line_leaves_one_empty_one() {
+        let mut b = buf("only");
+        b.delete_lines();
+        assert_eq!(b.lines(), [""]);
+        assert!(b.undo());
+        assert_eq!(b.line(0), "only");
+    }
+
+    #[test]
+    fn delete_line_takes_the_whole_selected_block_in_one_undo() {
+        let mut b = buf("a\nb\nc\nd");
+        b.move_to(Pos::new(1, 0), false);
+        b.move_to(Pos::new(2, 1), true);
+        b.delete_lines();
+        assert_eq!(b.lines(), ["a", "d"]);
+        b.undo();
+        assert_eq!(b.lines(), ["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn ctrl_home_and_end_span_the_buffer() {
+        let mut b = buf("one\ntwo\nthree");
+        b.move_to(Pos::new(1, 1), false);
+        b.move_doc_end(false);
+        assert_eq!(b.cursor, Pos::new(2, 5));
+        b.move_doc_start(true);
+        assert_eq!(b.cursor, Pos::new(0, 0));
+        assert_eq!(b.selected_text().unwrap(), "one\ntwo\nthree", "shift extends");
+    }
+
+    #[test]
+    fn select_line_takes_the_line_whole_and_grows_downward() {
+        let mut b = buf("aa\nbb\ncc");
+        b.move_to(Pos::new(0, 1), false);
+        b.select_line();
+        assert_eq!(b.selected_text().unwrap(), "aa\n", "newline included");
+        b.select_line();
+        assert_eq!(b.selected_text().unwrap(), "aa\nbb\n", "again takes the next");
+        b.select_line();
+        assert_eq!(b.selected_text().unwrap(), "aa\nbb\ncc", "the last line has no newline");
+    }
+
+    #[test]
+    fn select_line_squares_off_a_ragged_selection() {
+        let mut b = buf("aaa\nbbb");
+        b.move_to(Pos::new(0, 2), false);
+        b.move_to(Pos::new(1, 1), true);
+        b.select_line();
+        assert_eq!(b.selected_text().unwrap(), "aaa\nbbb", "both ends go line-wise");
+    }
+
+    #[test]
+    fn a_bracket_finds_its_partner_across_lines() {
+        let mut b = buf("fn x() {\n    y();\n}");
+        b.move_to(Pos::new(0, 7), false);
+        assert_eq!(b.matching_bracket(), Some((Pos::new(0, 7), Pos::new(2, 0))));
+        // And from the closing side, backwards.
+        b.move_to(Pos::new(2, 0), false);
+        assert_eq!(b.matching_bracket(), Some((Pos::new(2, 0), Pos::new(0, 7))));
+    }
+
+    #[test]
+    fn bracket_matching_respects_nesting() {
+        let mut b = buf("(a (b) c)");
+        b.move_to(Pos::new(0, 0), false);
+        assert_eq!(b.matching_bracket(), Some((Pos::new(0, 0), Pos::new(0, 8))));
+    }
+
+    #[test]
+    fn the_bracket_before_the_caret_counts_too() {
+        // `)|` — the caret sits between characters, and just after stepping
+        // over a closer this is exactly where it stands.
+        let mut b = buf("f() ");
+        b.move_to(Pos::new(0, 3), false);
+        assert_eq!(b.matching_bracket(), Some((Pos::new(0, 2), Pos::new(0, 1))));
+    }
+
+    #[test]
+    fn an_unmatched_bracket_matches_nothing() {
+        let mut b = buf("(a");
+        b.move_to(Pos::new(0, 0), false);
+        assert_eq!(b.matching_bracket(), None);
+        // And plain text is not a bracket at all.
+        b.move_to(Pos::new(0, 1), false);
+        assert_eq!(b.matching_bracket(), None);
     }
 
     #[test]

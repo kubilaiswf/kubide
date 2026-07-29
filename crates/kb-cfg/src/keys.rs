@@ -76,6 +76,9 @@ pub enum Action {
     Undo,
     Redo,
     SelectAll,
+    SelectLine,
+    /// Jump the caret to the bracket matching the one it touches.
+    GoToBracket,
     /// Opens the command list. Not itself listed there — running "open the
     /// list" from the list is a joke, not a feature.
     Commands,
@@ -98,6 +101,7 @@ pub enum Action {
     MoveLineUp,
     MoveLineDown,
     DuplicateLine,
+    DeleteLine,
     PomodoroToggle,
     PomodoroReset,
     PomodoroSkip,
@@ -166,6 +170,8 @@ impl Action {
         Action::Undo,
         Action::Redo,
         Action::SelectAll,
+        Action::SelectLine,
+        Action::GoToBracket,
         Action::GoToFile,
         Action::LastFile,
         Action::Find,
@@ -179,6 +185,7 @@ impl Action {
         Action::MoveLineUp,
         Action::MoveLineDown,
         Action::DuplicateLine,
+        Action::DeleteLine,
         Action::PomodoroToggle,
         Action::PomodoroReset,
         Action::PomodoroSkip,
@@ -230,6 +237,8 @@ impl Action {
             Undo => "Undo",
             Redo => "Redo",
             SelectAll => "Select all",
+            SelectLine => "Select line",
+            GoToBracket => "Go to matching bracket",
             Commands => "Show all commands",
             GoToFile => "Go to file",
             LastFile => "Switch to last file",
@@ -244,6 +253,7 @@ impl Action {
             MoveLineUp => "Move line up",
             MoveLineDown => "Move line down",
             DuplicateLine => "Duplicate line",
+            DeleteLine => "Delete line",
             PomodoroToggle => "Timer: start or pause",
             PomodoroReset => "Timer: reset",
             PomodoroSkip => "Timer: skip to next period",
@@ -283,8 +293,11 @@ impl Action {
             // NewFile and NewFolder live here too: Ctrl+N from an editor is
             // a habit every other editor installed, and only a shell — where
             // Ctrl+N walks history — has a better claim on the key.
-            Cut | Save | Undo | Redo | SelectAll | Find | Replace | GoToLine | ToggleComment
-            | MoveLineUp | MoveLineDown | DuplicateLine | NewFile | NewFolder => Scope::Editor,
+            Cut | Save | Undo | Redo | SelectAll | SelectLine | GoToBracket | Find | Replace
+            | GoToLine | ToggleComment
+            | MoveLineUp | MoveLineDown | DuplicateLine | DeleteLine | NewFile | NewFolder => {
+                Scope::Editor
+            }
             Rename | Delete | WorkspaceHere => Scope::Explorer,
             // Copy and paste stay global: they're bound to the shifted pair,
             // which is not a control character in any shell.
@@ -608,6 +621,11 @@ impl Default for Keymap {
             ("ctrl+y", Redo),
             ("ctrl+shift+z", Redo),
             ("ctrl+a", SelectAll),
+            ("ctrl+l", SelectLine),
+            // Editor scope, so a shell keeps its Ctrl+M (which is Enter).
+            // Ctrl+Shift+\ is the chord VS Code uses, and it is both taken by
+            // the split and unpressable on the layouts this file exists for.
+            ("ctrl+m", GoToBracket),
             ("ctrl+x", Cut),
             ("ctrl+plus", FontLarger),
             ("ctrl+numpadplus", FontLarger),
@@ -641,6 +659,9 @@ impl Default for Keymap {
             ("ctrl+shift+up", MoveLineUp),
             ("ctrl+shift+down", MoveLineDown),
             ("ctrl+d", DuplicateLine),
+            // The chord VS Code taught everyone; the line, not the file, and
+            // a letter, so it works on every layout.
+            ("ctrl+shift+k", DeleteLine),
             // F-keys: the timer is a background thing and should not take a
             // letter someone might want for editing.
             ("f9", PomodoroToggle),

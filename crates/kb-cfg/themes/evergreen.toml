@@ -1,0 +1,66 @@
+# Evergreen for kubide.
+#
+# From colorhunt.co's 18230F / 27391C / 255F38 / 1F7D53 — needles, bark
+# and two living greens on near-black forest ground. Text is candlelight
+# rather than white; white would be a flashlight.
+
+fg = "#e4e8d8"        # main text
+dim = "#8ba184"       # labels, hints, line numbers
+accent = "#3fae74"    # focus, selection, highlights — the palette's bright green, lifted
+warning = "#d8b45e"
+error = "#d1605c"
+divider = "#e4e8d81a" # pane hairline — mostly transparent on purpose
+overlay = "#18230ff2" # the command palette's backdrop
+
+[caption]
+fg = "#8ba184"
+icon = "#e4e8d8"
+hover = "#ffffff17"
+press = "#ffffff0d"
+close_hover = "#d1605cd9"
+close_press = "#aa4744e6"
+
+[terminal]
+background = "#18230f" # cells of exactly this colour stay transparent
+foreground = "#e4e8d8"
+cursor = "#3fae74bf"
+selection = "#27391c"
+
+[terminal.ansi]
+black = "#18230f"
+red = "#d1605c"
+green = "#1f7d53"
+yellow = "#d8b45e"
+blue = "#6f9ab8"
+magenta = "#a888b0"
+cyan = "#5fae9e"
+white = "#c2c9b4"
+bright_black = "#556549"
+bright_red = "#e5847f"
+bright_green = "#3fae74"
+bright_yellow = "#eccc82"
+bright_blue = "#93b9d3"
+bright_magenta = "#c2a6ca"
+bright_cyan = "#82cabc"
+bright_white = "#f0f3e6"
+
+[git]
+modified = "#d8b45e"
+added = "#3fae74"
+deleted = "#d1605c"
+untracked = "#5fae9e"
+conflicted = "#a888b0"
+
+[syntax]
+keyword = "#3fae74"
+function = "#82cabc"
+type = "#d8b45e"
+string = "#a5c987"
+number = "#c2a6ca"
+comment = "#556549"
+constant = "#c2a6ca"
+operator = "#e4e8d8"
+punctuation = "#8ba184"
+variable = "#e4e8d8"
+property = "#93b9d3"
+attribute = "#d89a5e"

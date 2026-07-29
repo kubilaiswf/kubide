@@ -1,0 +1,66 @@
+# Midnight Teal for kubide.
+#
+# Built on colorhunt.co's all-time most liked palette (222831 / 393E46 /
+# 00ADB5 / EEEEEE): charcoal depths, one confident teal, and text that
+# stays out of the way.
+
+fg = "#eeeeee"        # main text
+dim = "#8a929c"       # labels, hints, line numbers
+accent = "#00adb5"    # focus, selection, highlights
+warning = "#ffd369"
+error = "#f05454"
+divider = "#eeeeee1a" # pane hairline — mostly transparent on purpose
+overlay = "#222831f2" # the command palette's backdrop
+
+[caption]
+fg = "#8a929c"
+icon = "#eeeeee"
+hover = "#ffffff17"
+press = "#ffffff0d"
+close_hover = "#f05454d9"
+close_press = "#c73333e6"
+
+[terminal]
+background = "#222831" # cells of exactly this colour stay transparent
+foreground = "#eeeeee"
+cursor = "#00adb5bf"
+selection = "#393e46"
+
+[terminal.ansi]
+black = "#222831"
+red = "#f05454"
+green = "#7bc74d"
+yellow = "#ffd369"
+blue = "#30a2ff"
+magenta = "#c56cf0"
+cyan = "#00adb5"
+white = "#c9ced4"
+bright_black = "#57606a"
+bright_red = "#ff7b6f"
+bright_green = "#9ade6b"
+bright_yellow = "#ffe08a"
+bright_blue = "#6bbcff"
+bright_magenta = "#d98cff"
+bright_cyan = "#3fd0d4"
+bright_white = "#eeeeee"
+
+[git]
+modified = "#ffd369"
+added = "#7bc74d"
+deleted = "#f05454"
+untracked = "#00adb5"
+conflicted = "#c56cf0"
+
+[syntax]
+keyword = "#00adb5"
+function = "#5cd6da"
+type = "#ffd369"
+string = "#9ade6b"
+number = "#d98cff"
+comment = "#57606a"
+constant = "#d98cff"
+operator = "#eeeeee"
+punctuation = "#8a929c"
+variable = "#eeeeee"
+property = "#7fc8cc"
+attribute = "#ffa45c"

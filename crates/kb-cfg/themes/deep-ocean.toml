@@ -1,0 +1,66 @@
+# Deep Ocean for kubide.
+#
+# From colorhunt.co's 1B262C / 0F4C75 / 3282B8 / BBE1FA — near-black
+# water at the bottom, sunlit blue at the top, everything in between a
+# depth of the same sea.
+
+fg = "#dcecf7"        # main text, a touch lighter than the palette's sky
+dim = "#7da2bd"       # labels, hints, line numbers
+accent = "#3282b8"    # focus, selection, highlights
+warning = "#f5c964"
+error = "#e8556d"
+divider = "#bbe1fa1a" # pane hairline — mostly transparent on purpose
+overlay = "#1b262cf2" # the command palette's backdrop
+
+[caption]
+fg = "#7da2bd"
+icon = "#dcecf7"
+hover = "#ffffff17"
+press = "#ffffff0d"
+close_hover = "#e8556dd9"
+close_press = "#c23a51e6"
+
+[terminal]
+background = "#1b262c" # cells of exactly this colour stay transparent
+foreground = "#dcecf7"
+cursor = "#bbe1fabf"
+selection = "#0f4c75"
+
+[terminal.ansi]
+black = "#1b262c"
+red = "#e8556d"
+green = "#66c2a3"
+yellow = "#f5c964"
+blue = "#3282b8"
+magenta = "#a682d6"
+cyan = "#4fb3c9"
+white = "#b6cddd"
+bright_black = "#4d6a80"
+bright_red = "#ff7d92"
+bright_green = "#85e0c0"
+bright_yellow = "#ffdd8c"
+bright_blue = "#5ea9dd"
+bright_magenta = "#c3a3f0"
+bright_cyan = "#74d2e6"
+bright_white = "#e8f4fc"
+
+[git]
+modified = "#f5c964"
+added = "#66c2a3"
+deleted = "#e8556d"
+untracked = "#3282b8"
+conflicted = "#a682d6"
+
+[syntax]
+keyword = "#5ea9dd"
+function = "#74d2e6"
+type = "#f5c964"
+string = "#85e0c0"
+number = "#c3a3f0"
+comment = "#4d6a80"
+constant = "#c3a3f0"
+operator = "#dcecf7"
+punctuation = "#7da2bd"
+variable = "#dcecf7"
+property = "#9cc3de"
+attribute = "#f0a068"

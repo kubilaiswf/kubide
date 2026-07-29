@@ -29,6 +29,11 @@ pub struct Theme {
     /// the code underneath is a texture rather than something you start
     /// reading: a search box you can read through is a search box you cannot
     /// read.
+    ///
+    /// That second sentence was the intent; `e0` was not living up to it. At
+    /// 0.88 a light line of code behind the panel contributes about 30 of 255
+    /// and the eye finds it — over a diff the picker had two texts in it at
+    /// once. `f2` leaves a tint of what is behind rather than a legible ghost.
     pub overlay: Color,
 
     pub caption: Caption,
@@ -196,7 +201,7 @@ impl Default for Theme {
             warning: c(0xf2, 0xcc, 0x73),
             error: c(0xf2, 0x8c, 0x8c),
             divider: Color::rgb(0xff, 0xff, 0xff).with_alpha(0.10),
-            overlay: Color::rgb(0x14, 0x14, 0x1c).with_alpha(0.88),
+            overlay: Color::rgb(0x14, 0x14, 0x1c).with_alpha(0.95),
             caption: Caption::default(),
             terminal: TerminalColors::default(),
             git: GitColors::default(),

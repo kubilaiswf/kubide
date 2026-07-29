@@ -1,0 +1,66 @@
+# Coral Reef for kubide.
+#
+# From colorhunt.co's 364F6B / 3FC1C9 / F5F5F5 / FC5185 — deep navy
+# water, lagoon cyan, and one streak of coral. The coral is spent
+# sparingly, where a reef spends it: on the things alive.
+
+fg = "#f5f5f5"        # main text
+dim = "#93a7bc"       # labels, hints, line numbers
+accent = "#3fc1c9"    # focus, selection, highlights
+warning = "#ffd460"
+error = "#fc5185"
+divider = "#f5f5f51a" # pane hairline — mostly transparent on purpose
+overlay = "#2b3f56f2" # the command palette's backdrop, one step below the palette navy
+
+[caption]
+fg = "#93a7bc"
+icon = "#f5f5f5"
+hover = "#ffffff17"
+press = "#ffffff0d"
+close_hover = "#fc5185d9"
+close_press = "#d63a6ae6"
+
+[terminal]
+background = "#2b3f56" # cells of exactly this colour stay transparent
+foreground = "#f5f5f5"
+cursor = "#3fc1c9bf"
+selection = "#364f6b"
+
+[terminal.ansi]
+black = "#2b3f56"
+red = "#fc5185"
+green = "#7ed6a0"
+yellow = "#ffd460"
+blue = "#5a9cf8"
+magenta = "#c988e0"
+cyan = "#3fc1c9"
+white = "#d5dde5"
+bright_black = "#64798f"
+bright_red = "#ff7ba3"
+bright_green = "#9debbb"
+bright_yellow = "#ffe28c"
+bright_blue = "#84b6ff"
+bright_magenta = "#dfa8f2"
+bright_cyan = "#6cdde3"
+bright_white = "#ffffff"
+
+[git]
+modified = "#ffd460"
+added = "#7ed6a0"
+deleted = "#fc5185"
+untracked = "#3fc1c9"
+conflicted = "#c988e0"
+
+[syntax]
+keyword = "#fc5185"
+function = "#3fc1c9"
+type = "#ffd460"
+string = "#9debbb"
+number = "#dfa8f2"
+comment = "#64798f"
+constant = "#dfa8f2"
+operator = "#f5f5f5"
+punctuation = "#93a7bc"
+variable = "#f5f5f5"
+property = "#6cdde3"
+attribute = "#ff9c6b"

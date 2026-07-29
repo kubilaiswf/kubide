@@ -23,7 +23,10 @@
 
 # A named theme from %APPDATA%\kubide\themes\<name>.toml. kubide seeds that
 # folder on first start with its built-ins — gruvbox, catppuccin, tokyonight,
-# nord, rose-pine — and a file you drop there wins over the built-in with the
+# nord, rose-pine, and a set grown from colorhunt.co's most liked palettes:
+# midnight-teal, deep-ocean, neon-sushi, steel, coral-reef, desert-night,
+# moss, mulberry, harbor, aurora, evergreen, paper (the one light theme) —
+# and a file you drop there wins over the built-in with the
 # same name. Copy one, recolour it, save: the window repaints as you go, no
 # restart. When `theme` is a name like this, the inline [theme] table cannot
 # also be set — TOML gives the key to one owner, which is the right amount
@@ -122,6 +125,42 @@ snippets = true
 # The work timer. It counts down in the status bar and stops; it does not pop
 # up, make noise, or take focus. An editor that interrupts you is the opposite
 # of what this is for.
+# The mouse pointer. Off by default: kubide wears Windows' own pointers,
+# with the right roles in the right places — I-beam over text, hand over
+# the clickable, resize arrows on the dividers. Set custom = true to swap
+# them for pointers drawn in the theme's colours, or for .cur/.ani files
+# of your own — shape, size and colour are all yours from there.
+[cursor]
+custom = false
+# Pointer size in pixels, 12 to 128. 0 follows the system cursor size,
+# which is where Windows' accessibility setting lives.
+size = 0
+# "accent" follows the theme; any "#rrggbb" pins a colour of your own.
+color = "accent"
+# One role's own colour, when the shared one should not dress everything —
+# a classic near-black arrow over a theme-coloured I-beam, say. The hand
+# follows pointer_color. Empty follows `color`; the outline always takes
+# the opposite lightness, so dark and light bodies both stay visible.
+pointer_color = ""
+text_color = ""
+# Over everything that is not text: "arrow" (the classic, redrawn slimmer
+# and softer than the system's), "dart" (a four-point dart, nothing like
+# the stock pointer), "triangle" (just the tip), or "temple" — the TempleOS
+# pointer traced from the original, hard pixels and dotted crosshair kept,
+# in loving memory of Terry A. Davis.
+pointer = "arrow"
+# Over text and terminals: "ibeam" (stem and serifs) or "bar" (stem alone).
+text = "ibeam"
+# Or bring your own: absolute paths to .cur or .ani files, one per role.
+# A file beats the drawn shape; an unreadable one falls back to the drawing.
+# The two resize arrows are separate files because no one file faces both
+# ways. Empty means "draw it".
+pointer_file = ""
+text_file = ""
+hand_file = ""
+resize_we_file = ""
+resize_ns_file = ""
+
 [pomodoro]
 work = 25
 short_break = 5
@@ -146,8 +185,8 @@ auto_advance = false
 #
 # Actions: split-right, split-down, close-pane, open-terminal, open-explorer,
 # toggle-explorer, new-file, new-folder, rename, delete, focus-left, focus-right, focus-up, focus-down, copy, paste,
-# cut, save, undo, redo, select-all, commands, go-to-file, find, go-to-line,
-# find-in-project, toggle-comment, move-line-up, move-line-down, duplicate-line, font-larger,
+# cut, save, undo, redo, select-all, select-line, go-to-bracket, commands, go-to-file, find, go-to-line,
+# find-in-project, toggle-comment, move-line-up, move-line-down, duplicate-line, delete-line, font-larger,
 # pomodoro-toggle, pomodoro-reset, pomodoro-skip, font-larger, font-smaller,
 # quit.
 #
@@ -233,6 +272,11 @@ auto_advance = false
 "ctrl+/" = "toggle-comment"
 "ctrl+7" = "toggle-comment"
 "ctrl+d" = "duplicate-line"
+# The chord VS Code taught everyone; the line, not the file.
+"ctrl+shift+k" = "delete-line"
+"ctrl+l" = "select-line"
+# Editor scope, so a shell keeps its Ctrl+M (which is Enter).
+"ctrl+m" = "go-to-bracket"
 # Not Alt+arrow, which moves pane focus here.
 "ctrl+shift+up" = "move-line-up"
 "ctrl+shift+down" = "move-line-down"
@@ -256,7 +300,7 @@ accent = "#8cb8f2"       # focus stripe
 warning = "#f2cc73"
 error = "#f28c8c"
 divider = "#ffffff1a"    # pane hairline
-overlay = "#14141ce0"    # Ctrl+P / Ctrl+F backdrop
+overlay = "#14141cf2"    # Ctrl+P / Ctrl+F backdrop; low alpha lets code read through
 
 [theme.caption]
 fg = "#b3b0ad"

@@ -41,8 +41,93 @@ pub struct Config {
     pub pomodoro: Pomodoro,
     pub help: Help,
     pub editor: Editing,
+    pub cursor: Cursor,
     /// Chord to action. Merges over the defaults rather than replacing them.
     pub keys: Keymap,
+}
+
+/// The mouse pointer, drawn by kubide rather than borrowed from Windows.
+///
+/// Everything about it is a setting because a pointer is taste and nothing
+/// but: too small for one person is exactly right for another, and the only
+/// wrong answer is deciding for them.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Cursor {
+    /// Off by default: out of the box kubide wears Windows' own pointers,
+    /// and the right roles still appear in the right places — I-beam over
+    /// text, hand over the clickable, resize arrows on the dividers. `true`
+    /// swaps them for the drawn set below (or your own files), which is a
+    /// taste someone should choose, not inherit.
+    pub custom: bool,
+    /// Pointer canvas in pixels, 12 to 128. `0` follows the system cursor
+    /// size, which is where Windows' accessibility setting lives.
+    pub size: u32,
+    /// `"accent"` follows the theme; any `"#rrggbb"` pins a colour.
+    pub color: String,
+    /// Colours for one role only, when the one `color` should not dress
+    /// everything: a classic near-black arrow over a theme-coloured I-beam,
+    /// say. Empty follows `color`. The outline picks its own side — light
+    /// around a dark body, dark around a light one — so any colour works.
+    pub pointer_color: String,
+    pub text_color: String,
+    /// The shape over everything that is not text.
+    pub pointer: PointerStyle,
+    /// The shape over text.
+    pub text: TextPointerStyle,
+    /// Paths to `.cur` or `.ani` files, one per role; empty means "draw it".
+    /// A file beats the drawn shape, so any downloaded cursor pack drops
+    /// straight in. An unreadable file falls back to the drawn shape rather
+    /// than to nothing.
+    pub pointer_file: String,
+    pub text_file: String,
+    pub hand_file: String,
+    /// The two resize arrows are separate files because no single file can
+    /// face both ways.
+    pub resize_we_file: String,
+    pub resize_ns_file: String,
+}
+
+impl Default for Cursor {
+    fn default() -> Self {
+        Self {
+            custom: false,
+            size: 0,
+            color: "accent".into(),
+            pointer_color: String::new(),
+            text_color: String::new(),
+            pointer: PointerStyle::Arrow,
+            text: TextPointerStyle::Ibeam,
+            pointer_file: String::new(),
+            text_file: String::new(),
+            hand_file: String::new(),
+            resize_we_file: String::new(),
+            resize_ns_file: String::new(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PointerStyle {
+    /// The classic pointer, redrawn slimmer and softer than the system's.
+    Arrow,
+    /// A four-point dart — nothing like the stock pointer, on purpose.
+    Dart,
+    /// Just the tip — a minimal sliver of a pointer.
+    Triangle,
+    /// The TempleOS pointer, traced from the original, hard pixels kept.
+    /// In loving memory of Terry A. Davis.
+    Temple,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TextPointerStyle {
+    /// Stem and serifs, the shape everyone knows.
+    Ibeam,
+    /// The stem alone, for people who find serifs fussy.
+    Bar,
 }
 
 /// Editing behaviour switches. Both on by default and both plain on/off:
@@ -553,6 +638,21 @@ pub const BUILTIN_THEMES: &[(&str, &str)] = &[
     ("tokyonight", include_str!("../themes/tokyonight.toml")),
     ("nord", include_str!("../themes/nord.toml")),
     ("rose-pine", include_str!("../themes/rose-pine.toml")),
+    // Built from colorhunt.co's most liked palettes rather than ported from
+    // other editors — each one grows a four-colour palette into the full
+    // format, so the herd stays recognisably that palette.
+    ("midnight-teal", include_str!("../themes/midnight-teal.toml")),
+    ("deep-ocean", include_str!("../themes/deep-ocean.toml")),
+    ("neon-sushi", include_str!("../themes/neon-sushi.toml")),
+    ("steel", include_str!("../themes/steel.toml")),
+    ("coral-reef", include_str!("../themes/coral-reef.toml")),
+    ("desert-night", include_str!("../themes/desert-night.toml")),
+    ("moss", include_str!("../themes/moss.toml")),
+    ("mulberry", include_str!("../themes/mulberry.toml")),
+    ("harbor", include_str!("../themes/harbor.toml")),
+    ("aurora", include_str!("../themes/aurora.toml")),
+    ("evergreen", include_str!("../themes/evergreen.toml")),
+    ("paper", include_str!("../themes/paper.toml")),
 ];
 
 /// `themes` beside the config file, so `KUBIDE_CONFIG` moves both at once.

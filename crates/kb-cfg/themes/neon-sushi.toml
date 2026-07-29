@@ -1,0 +1,66 @@
+# Neon Sushi for kubide.
+#
+# From colorhunt.co's 252A34 / 08D9D6 / FF2E63 / EAEAEA — the famous
+# cyan-and-pink pair on charcoal. The two neons carry the whole theme:
+# cyan is where you are, pink is what matters.
+
+fg = "#eaeaea"        # main text
+dim = "#8b93a3"       # labels, hints, line numbers
+accent = "#08d9d6"    # focus, selection, highlights
+warning = "#ffcf5c"
+error = "#ff2e63"
+divider = "#eaeaea1a" # pane hairline — mostly transparent on purpose
+overlay = "#252a34f2" # the command palette's backdrop
+
+[caption]
+fg = "#8b93a3"
+icon = "#eaeaea"
+hover = "#ffffff17"
+press = "#ffffff0d"
+close_hover = "#ff2e63d9"
+close_press = "#d11e4de6"
+
+[terminal]
+background = "#252a34" # cells of exactly this colour stay transparent
+foreground = "#eaeaea"
+cursor = "#08d9d6bf"
+selection = "#3a4150"
+
+[terminal.ansi]
+black = "#252a34"
+red = "#ff2e63"
+green = "#69dc76"
+yellow = "#ffcf5c"
+blue = "#4ba3ff"
+magenta = "#d76cf5"
+cyan = "#08d9d6"
+white = "#c6cad2"
+bright_black = "#5a6273"
+bright_red = "#ff6b90"
+bright_green = "#8cf29a"
+bright_yellow = "#ffe08a"
+bright_blue = "#7dbdff"
+bright_magenta = "#e592ff"
+bright_cyan = "#54f0ed"
+bright_white = "#ffffff"
+
+[git]
+modified = "#ffcf5c"
+added = "#69dc76"
+deleted = "#ff2e63"
+untracked = "#08d9d6"
+conflicted = "#d76cf5"
+
+[syntax]
+keyword = "#ff2e63"
+function = "#08d9d6"
+type = "#ffcf5c"
+string = "#8cf29a"
+number = "#e592ff"
+comment = "#5a6273"
+constant = "#e592ff"
+operator = "#eaeaea"
+punctuation = "#8b93a3"
+variable = "#eaeaea"
+property = "#54f0ed"
+attribute = "#ff8e4f"

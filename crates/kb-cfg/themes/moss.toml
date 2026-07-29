@@ -1,0 +1,66 @@
+# Moss for kubide.
+#
+# From colorhunt.co's 2C3930 / 3F4F44 / A27B5C / DCD7C9 — forest floor
+# greens with worn leather and bone-white text. The warm brown does the
+# pointing; the greens just hold the room.
+
+fg = "#dcd7c9"        # main text
+dim = "#8d9a90"       # labels, hints, line numbers
+accent = "#b58a68"    # focus, selection, highlights — the leather, brightened
+warning = "#d9b55c"
+error = "#cf6a5e"
+divider = "#dcd7c91a" # pane hairline — mostly transparent on purpose
+overlay = "#2c3930f2" # the command palette's backdrop
+
+[caption]
+fg = "#8d9a90"
+icon = "#dcd7c9"
+hover = "#ffffff17"
+press = "#ffffff0d"
+close_hover = "#cf6a5ed9"
+close_press = "#a84f45e6"
+
+[terminal]
+background = "#2c3930" # cells of exactly this colour stay transparent
+foreground = "#dcd7c9"
+cursor = "#dcd7c9bf"
+selection = "#3f4f44"
+
+[terminal.ansi]
+black = "#2c3930"
+red = "#cf6a5e"
+green = "#8fae7f"
+yellow = "#d9b55c"
+blue = "#7e9bb0"
+magenta = "#b08a9c"
+cyan = "#7fb0a1"
+white = "#c5c0b2"
+bright_black = "#5f6f64"
+bright_red = "#e28a7e"
+bright_green = "#adc99c"
+bright_yellow = "#eccd80"
+bright_blue = "#9fbccf"
+bright_magenta = "#c9a5b7"
+bright_cyan = "#9ecabc"
+bright_white = "#ece8dc"
+
+[git]
+modified = "#d9b55c"
+added = "#8fae7f"
+deleted = "#cf6a5e"
+untracked = "#7fb0a1"
+conflicted = "#b08a9c"
+
+[syntax]
+keyword = "#b58a68"
+function = "#9ecabc"
+type = "#d9b55c"
+string = "#adc99c"
+number = "#c9a5b7"
+comment = "#5f6f64"
+constant = "#c9a5b7"
+operator = "#dcd7c9"
+punctuation = "#8d9a90"
+variable = "#dcd7c9"
+property = "#9fbccf"
+attribute = "#dd9a5f"

@@ -1,0 +1,66 @@
+# Steel for kubide.
+#
+# From colorhunt.co's 27374D / 526D82 / 9DB2BF / DDE6ED — four blues of
+# the same alloy, dark to pale. Deliberately quiet: the only loud things
+# on screen should be the diagnostics.
+
+fg = "#dde6ed"        # main text
+dim = "#9db2bf"       # labels, hints, line numbers
+accent = "#7da7c4"    # focus, selection, highlights — the palette's mid-blues, brightened
+warning = "#e6c07a"
+error = "#d9707e"
+divider = "#dde6ed1a" # pane hairline — mostly transparent on purpose
+overlay = "#27374df2" # the command palette's backdrop
+
+[caption]
+fg = "#9db2bf"
+icon = "#dde6ed"
+hover = "#ffffff17"
+press = "#ffffff0d"
+close_hover = "#d9707ed9"
+close_press = "#b25260e6"
+
+[terminal]
+background = "#27374d" # cells of exactly this colour stay transparent
+foreground = "#dde6ed"
+cursor = "#dde6edbf"
+selection = "#526d82"
+
+[terminal.ansi]
+black = "#27374d"
+red = "#d9707e"
+green = "#82b895"
+yellow = "#e6c07a"
+blue = "#7da7c4"
+magenta = "#b294c7"
+cyan = "#7fbdc4"
+white = "#c3d1db"
+bright_black = "#678092"
+bright_red = "#ef8f9b"
+bright_green = "#a1d4b2"
+bright_yellow = "#f2d49b"
+bright_blue = "#9ec2da"
+bright_magenta = "#cbb0dd"
+bright_cyan = "#9fd6dc"
+bright_white = "#eef4f8"
+
+[git]
+modified = "#e6c07a"
+added = "#82b895"
+deleted = "#d9707e"
+untracked = "#7da7c4"
+conflicted = "#b294c7"
+
+[syntax]
+keyword = "#9ec2da"
+function = "#9fd6dc"
+type = "#e6c07a"
+string = "#a1d4b2"
+number = "#cbb0dd"
+comment = "#678092"
+constant = "#cbb0dd"
+operator = "#dde6ed"
+punctuation = "#9db2bf"
+variable = "#dde6ed"
+property = "#b4c9d6"
+attribute = "#e0a273"

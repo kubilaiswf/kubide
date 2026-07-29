@@ -12,7 +12,7 @@ use windows::Win32::Graphics::Direct2D::Common::*;
 use windows::Win32::Graphics::Direct2D::*;
 use windows_numerics::Vector2;
 
-use crate::content::Content;
+use crate::content::{self, Content};
 use crate::metrics::{self, TextArea, INSET, PAD};
 use crate::{Kubide, Renderer};
 
@@ -24,6 +24,22 @@ fn to_color(c: kb_term::Rgb, a: f32) -> D2D1_COLOR_F {
 pub fn themed(c: kb_cfg::Color, alpha: f32) -> D2D1_COLOR_F {
     let (r, g, b, a) = c.f32s();
     rgba(r, g, b, a * alpha)
+}
+
+/// How solid an overlay's backdrop has to be, whatever its theme says.
+///
+/// Below this a light line of code behind the panel contributes enough to be
+/// read, and a list of file names sitting on top of a diff becomes two texts
+/// at once. The colour is the theme's business; this is not — a theme file
+/// that asks for less is describing a bug, and old seeded copies of the
+/// built-ins ask for exactly that.
+const OVERLAY_FLOOR: f32 = 0.95;
+
+/// The backdrop of an overlay: the theme's colour, never thinner than
+/// [`OVERLAY_FLOOR`]. A theme is free to ask for more.
+fn overlay(c: kb_cfg::Color) -> D2D1_COLOR_F {
+    let (r, g, b, a) = c.f32s();
+    rgba(r, g, b, a.max(OVERLAY_FLOOR))
 }
 
 /// One explorer line, copied out of the tree so the shaping cache can borrow
@@ -112,6 +128,7 @@ const CHEAT_SHEET: &[Cheat] = &[
     (kb_cfg::Action::Save, "", "Save"),
     (kb_cfg::Action::ToggleComment, "", "Toggle comment"),
     (kb_cfg::Action::DuplicateLine, "", "Duplicate line"),
+    (kb_cfg::Action::DeleteLine, "", "Delete line"),
     (kb_cfg::Action::MoveLineUp, "Ctrl+Shift+\u{2191}\u{2193}", "Move line"),
     (kb_cfg::Action::ToggleExplorer, "", "File tree"),
     (kb_cfg::Action::OpenTerminal, "", "Terminal"),
@@ -616,7 +633,7 @@ impl Kubide {
         }
 
         let syntax = self.syntax.clone();
-        let (title, modified, status, lines, top, left, total, cursor, selection, spans, widest, marks) = {
+        let (title, modified, status, lines, top, left, total, cursor, selection, brackets, spans, widest, marks) = {
             let Some(Content::Editor(e)) = self.content.get_mut(&pane) else {
                 return Ok(());
             };
@@ -649,6 +666,7 @@ impl Kubide {
                 b.len(),
                 b.cursor,
                 b.selection(),
+                b.matching_bracket(),
                 spans,
                 widest,
                 e.marks.clone(),
@@ -727,6 +745,24 @@ impl Kubide {
                             right: text_x + (to - left) as f32 * cw,
                             bottom: y + lh,
                         },
+                        &brush,
+                    );
+                }
+            }
+
+            // The bracket pair the caret is touching, tinted like a faint
+            // selection. Only while the pane is focused: the highlight
+            // follows the caret, and the caret is not drawn either.
+            if let Some(pair) = brackets.filter(|_| focused) {
+                let brush = dc.CreateSolidColorBrush(&themed(theme.accent, 0.30), None)?;
+                for p in [pair.0, pair.1] {
+                    if p.line < top || p.line >= top + visible || p.col < left {
+                        continue;
+                    }
+                    let x = text_x + (p.col - left) as f32 * cw;
+                    let y = y0 + (p.line - top) as f32 * lh;
+                    dc.FillRectangle(
+                        &D2D_RECT_F { left: x, top: y, right: x + cw, bottom: y + lh },
                         &brush,
                     );
                 }
@@ -1415,8 +1451,6 @@ impl Kubide {
         r: Rect,
         focused: bool,
     ) -> Result<()> {
-        use kb_cfg::Action;
-
         let lh = self.text.line_height();
         let (cw, _) = self.text.cell_size();
 
@@ -1428,20 +1462,14 @@ impl Kubide {
         };
 
         // Read from the keymap, like the empty pane's hints: after a rebind
-        // a fixed list would advertise a key that does nothing.
-        let hints: Vec<(String, &str)> = [
-            (Action::OpenFolder, "open folder"),
-            (Action::GoToFile, "go to file"),
-            (Action::Commands, "all commands"),
-            (Action::OpenTerminal, "terminal"),
-            (Action::ToggleExplorer, "file tree"),
-            (Action::OpenSettings, "settings"),
-        ]
-        .iter()
-        .filter_map(|(action, label)| {
-            Some((self.cfg.keys.binding_for(*action)?.to_string(), *label))
-        })
-        .collect();
+        // a fixed list would advertise a key that does nothing. Same list as
+        // the empty pane's, from the one place that holds it.
+        let hints: Vec<(String, &str)> = content::STARTER_KEYS
+            .iter()
+            .filter_map(|(action, label)| {
+                Some((self.cfg.keys.binding_for(*action)?.to_string(), *label))
+            })
+            .collect();
 
         // One column width for everything, so the block reads as one thing.
         let chord_w = hints.iter().map(|(c, _)| c.chars().count()).max().unwrap_or(0);
@@ -1486,16 +1514,36 @@ impl Kubide {
 
             // Fainter than the wordmark under it: a watermark that competes
             // with the content is a poster, not a watermark.
+            //
+            // Drawn in two passes, body then shadow, because that is what the
+            // style is: the box-drawing characters are a shadow cast by the
+            // blocks. Given one flat alpha they weigh the same as the letter,
+            // and a hairline stroke beside a solid block at 11% reads as a
+            // smudged K rather than a shaded one.
             let ghost = dc.CreateSolidColorBrush(&themed(theme.fg, if focused { 0.11 } else { 0.06 }), None)?;
+            let shade = dc.CreateSolidColorBrush(&themed(theme.fg, if focused { 0.05 } else { 0.03 }), None)?;
+            // One left edge for every row, taken from the character grid
+            // rather than each row's measured width: rows hold different
+            // numbers of blocks and box characters, and centring them one by
+            // one lets the shape drift a fraction of a cell per line.
+            let cols = watermark.iter().map(|row| row.chars().count()).max().unwrap_or(0);
+            let mark_x = r.x + (r.w - cols as f32 * cw) * 0.5;
+            let is_body = |c: char| c == '\u{2588}' || c == '#';
             for row in watermark {
-                let w = self.text.width_of(row);
-                let layout = self.text.line(row)?;
-                dc.DrawTextLayout(
-                    Vector2 { X: r.x + (r.w - w) * 0.5, Y: y },
-                    &layout,
-                    &ghost,
-                    D2D1_DRAW_TEXT_OPTIONS_NONE,
-                );
+                for (brush, keep) in [(&ghost, true), (&shade, false)] {
+                    let part: String =
+                        row.chars().map(|c| if is_body(c) == keep { c } else { ' ' }).collect();
+                    if part.trim().is_empty() {
+                        continue;
+                    }
+                    let layout = self.text.line(&part)?;
+                    dc.DrawTextLayout(
+                        Vector2 { X: mark_x, Y: y },
+                        &layout,
+                        brush,
+                        D2D1_DRAW_TEXT_OPTIONS_NONE,
+                    );
+                }
                 y += lh;
             }
             y += lh;
@@ -1583,26 +1631,23 @@ impl Kubide {
         r: Rect,
         focused: bool,
     ) -> Result<()> {
-        use kb_cfg::Action;
         let theme = self.cfg.theme;
         let lh = self.text.line_height();
 
         // Read from the keymap rather than hardcoded: after a rebind a fixed
         // list would be telling the user to press a key that does nothing.
-        let hints: Vec<String> = [
-            (Action::OpenTerminal, "terminal"),
-            (Action::OpenExplorer, "file explorer"),
-            (Action::SplitRight, "split side by side"),
-            (Action::SplitDown, "split stacked"),
-            (Action::ClosePane, "close pane"),
-            (Action::FocusRight, "move focus"),
-        ]
-        .iter()
-        .filter_map(|(action, label)| {
-            let chord = self.cfg.keys.binding_for(*action)?;
-            Some(format!("{:<14} {label}", chord.to_string()))
-        })
-        .collect();
+        // The same starter keys the welcome screen shows, then the two that
+        // only make sense inside a pane, with a blank line between the group
+        // that gets you anywhere and the group that is about this box.
+        let line = |chord: &kb_cfg::Chord, label: &str| format!("{:<14} {label}", chord.to_string());
+        let hints: Vec<String> = content::STARTER_KEYS
+            .iter()
+            .filter_map(|(action, label)| Some(line(&self.cfg.keys.binding_for(*action)?, label)))
+            .chain(std::iter::once(String::new()))
+            .chain(content::PANE_KEYS.iter().filter_map(|(action, label)| {
+                Some(line(&self.cfg.keys.binding_for(*action)?, label))
+            }))
+            .collect();
         unsafe {
             let dim = dc.CreateSolidColorBrush(
                 &themed(theme.dim, if focused { 0.9 } else { 0.45 }),
@@ -1715,11 +1760,11 @@ impl Kubide {
 
         let theme = self.cfg.theme;
         unsafe {
-            let bg = dc.CreateSolidColorBrush(&themed(theme.overlay, 1.0), None)?;
+            let bg = dc.CreateSolidColorBrush(&overlay(theme.overlay), None)?;
             let edge = dc.CreateSolidColorBrush(&themed(theme.accent, 0.85), None)?;
             let fg = dc.CreateSolidColorBrush(&themed(theme.fg, 1.0), None)?;
             let picked = dc.CreateSolidColorBrush(&themed(theme.accent, 1.0), None)?;
-            let on_picked = dc.CreateSolidColorBrush(&themed(theme.overlay, 1.0), None)?;
+            let on_picked = dc.CreateSolidColorBrush(&overlay(theme.overlay), None)?;
 
             dc.FillRectangle(
                 &D2D_RECT_F {
@@ -1787,6 +1832,11 @@ impl Kubide {
 
         let lh = self.text.line_height();
         let (cell_w, _) = self.text.cell_size();
+        // Everything clickable lights up under the mouse. The highlight and
+        // the hand cursor make the same promise from two directions; a row
+        // that answers to a click but sits inert under the pointer reads as
+        // furniture.
+        let (mx, my) = self.mouse;
         let width = (w * 0.7).clamp(560.0, 1040.0).min(w - 24.0);
         let height = (h * 0.66).clamp(340.0, 680.0).min(h - 48.0);
         let x = (w - width) * 0.5;
@@ -1816,9 +1866,29 @@ impl Kubide {
         let selected_row = p.selected_row();
         let chosen = p.chosen();
         let filter = p.filter.clone();
-        let quick = p.quick.clone();
-        let recents = p.recents.clone();
-        let drives = p.drives.clone();
+        let address = p.address.clone();
+        let select_all = p.select_all;
+        let caret_on = self.caret_on();
+        // The rail is labelled as one list rather than three: a `Documents` in
+        // quick access and a different `Documents` in the recents is the same
+        // coin toss as two `release`s, and only a whole-rail view can see it.
+        let (quick, recents, drives) = {
+            let all: Vec<std::path::PathBuf> = p
+                .quick
+                .iter()
+                .chain(&p.recents)
+                .chain(&p.drives)
+                .cloned()
+                .collect();
+            let mut labels = kb_fs::distinct_labels(&all).into_iter();
+            let mut take = |group: &[std::path::PathBuf]| -> Vec<(std::path::PathBuf, String)> {
+                group
+                    .iter()
+                    .map(|path| (path.clone(), labels.next().unwrap_or_default()))
+                    .collect()
+            };
+            (take(&p.quick), take(&p.recents), take(&p.drives))
+        };
         let current = p.dir.clone();
         let dir_label = crumbs.last().map(|c| c.name.clone()).unwrap_or_default();
         let (can_back, can_fwd, can_up) =
@@ -1828,7 +1898,7 @@ impl Kubide {
         unsafe {
             // The same material as the palette: translucent over the
             // acrylic, hairline edge, nothing louder than the content.
-            let bg = dc.CreateSolidColorBrush(&themed(theme.overlay, 1.0), None)?;
+            let bg = dc.CreateSolidColorBrush(&overlay(theme.overlay), None)?;
             let edge = dc.CreateSolidColorBrush(&themed(theme.divider, 1.6), None)?;
             let fg = dc.CreateSolidColorBrush(&themed(theme.fg, 1.0), None)?;
             let dim = dc.CreateSolidColorBrush(&themed(theme.dim, 1.0), None)?;
@@ -1873,6 +1943,17 @@ impl Kubide {
             let mut nav_rects = [kb_ui::Rect::default(); 3];
             for (i, (glyph, alive)) in arrows.iter().enumerate() {
                 nav_rects[i] = kb_ui::Rect::new(bx, btn_y, btn, btn);
+                if *alive && nav_rects[i].contains(mx, my) {
+                    let hover = dc.CreateSolidColorBrush(&themed(theme.fg, 0.08), None)?;
+                    dc.FillRoundedRectangle(
+                        &D2D1_ROUNDED_RECT {
+                            rect: D2D_RECT_F { left: bx, top: btn_y, right: bx + btn, bottom: btn_y + btn },
+                            radiusX: 5.0,
+                            radiusY: 5.0,
+                        },
+                        &hover,
+                    );
+                }
                 let gw = self.text.width_of(glyph);
                 let layout = self.text.volatile(glyph)?;
                 dc.DrawTextLayout(
@@ -1891,39 +1972,87 @@ impl Kubide {
             boxed(addr_x, btn_y, addr_w, btn)?;
             boxed(search_x, btn_y, search_w, btn)?;
 
-            // The path inside the address bar, one clickable segment per
-            // directory, current one in full colour. Cut from the left when
-            // it runs long: the segments that matter are where you stand.
-            let sep = if icons == kb_fs::Icons::Ascii { " > " } else { " \u{203a} " };
-            let sep_w = self.text.width_of(sep);
-            let mut widths: Vec<f32> = crumbs.iter().map(|c| self.text.width_of(&c.name)).collect();
-            let mut start = 0;
-            while widths.iter().sum::<f32>()
-                + sep_w * widths.len().saturating_sub(1) as f32
-                > addr_w - PAD * 2.0
-                && widths.len() > 1
-            {
-                widths.remove(0);
-                start += 1;
-            }
-            let mut cx = addr_x + PAD * 0.7;
             let mut crumb_hits: Vec<(f32, f32, std::path::PathBuf)> = Vec::new();
-            for (i, crumb) in crumbs.iter().enumerate().skip(start) {
-                let last = i + 1 == crumbs.len();
-                let cw = self.text.width_of(&crumb.name);
-                let layout = self.text.volatile(&crumb.name)?;
+            if let Some(addr) = &address {
+                // The bar in its editable state: the raw path with a caret,
+                // crumbs gone until Enter or Escape. Cut from the left when
+                // it overflows — the end of a path is the part being typed.
+                let avail = addr_w - PAD * 1.4 - 4.0;
+                let mut shown: String = addr.clone();
+                while self.text.width_of(&shown) > avail && shown.chars().count() > 1 {
+                    shown.remove(0);
+                }
+                let tx = addr_x + PAD * 0.7;
+                let tw = self.text.width_of(&shown);
+                // Selected whole: the highlight behind it says the next
+                // keystroke replaces the path rather than extending it.
+                if select_all && !shown.is_empty() {
+                    let sel = dc.CreateSolidColorBrush(&themed(theme.accent, 0.30), None)?;
+                    dc.FillRectangle(
+                        &D2D_RECT_F {
+                            left: tx - 1.0,
+                            top: text_y,
+                            right: tx + tw + 1.0,
+                            bottom: text_y + lh,
+                        },
+                        &sel,
+                    );
+                }
+                let layout = self.text.volatile(&shown)?;
                 dc.DrawTextLayout(
-                    Vector2 { X: cx, Y: text_y },
+                    Vector2 { X: tx, Y: text_y },
                     &layout,
-                    if last { &fg } else { &dim },
+                    &fg,
                     D2D1_DRAW_TEXT_OPTIONS_NONE,
                 );
-                crumb_hits.push((cx, cx + cw, crumb.dir.clone()));
-                cx += cw;
-                if !last {
-                    let layout = self.text.volatile(sep)?;
-                    dc.DrawTextLayout(Vector2 { X: cx, Y: text_y }, &layout, &faint, D2D1_DRAW_TEXT_OPTIONS_NONE);
-                    cx += sep_w;
+                if caret_on {
+                    let caret_x = tx + tw + 1.0;
+                    let caret = dc.CreateSolidColorBrush(&themed(theme.accent, 0.95), None)?;
+                    dc.FillRectangle(
+                        &D2D_RECT_F {
+                            left: caret_x,
+                            top: text_y,
+                            right: caret_x + 2.0,
+                            bottom: text_y + lh,
+                        },
+                        &caret,
+                    );
+                }
+            } else {
+                // The path as one clickable segment per directory, current
+                // one in full colour. Cut from the left when it runs long:
+                // the segments that matter are where you stand.
+                let sep = if icons == kb_fs::Icons::Ascii { " > " } else { " \u{203a} " };
+                let sep_w = self.text.width_of(sep);
+                let mut widths: Vec<f32> =
+                    crumbs.iter().map(|c| self.text.width_of(&c.name)).collect();
+                let mut start = 0;
+                while widths.iter().sum::<f32>()
+                    + sep_w * widths.len().saturating_sub(1) as f32
+                    > addr_w - PAD * 2.0
+                    && widths.len() > 1
+                {
+                    widths.remove(0);
+                    start += 1;
+                }
+                let mut cx = addr_x + PAD * 0.7;
+                for (i, crumb) in crumbs.iter().enumerate().skip(start) {
+                    let last = i + 1 == crumbs.len();
+                    let cw = self.text.width_of(&crumb.name);
+                    let layout = self.text.volatile(&crumb.name)?;
+                    dc.DrawTextLayout(
+                        Vector2 { X: cx, Y: text_y },
+                        &layout,
+                        if last { &fg } else { &dim },
+                        D2D1_DRAW_TEXT_OPTIONS_NONE,
+                    );
+                    crumb_hits.push((cx, cx + cw, crumb.dir.clone()));
+                    cx += cw;
+                    if !last {
+                        let layout = self.text.volatile(sep)?;
+                        dc.DrawTextLayout(Vector2 { X: cx, Y: text_y }, &layout, &faint, D2D1_DRAW_TEXT_OPTIONS_NONE);
+                        cx += sep_w;
+                    }
                 }
             }
 
@@ -1934,13 +2063,51 @@ impl Kubide {
             } else {
                 (filter.clone(), true)
             };
+            let stx = search_x + PAD * 0.7;
+            if select_all && address.is_none() && searching {
+                let sel = dc.CreateSolidColorBrush(&themed(theme.accent, 0.30), None)?;
+                dc.FillRectangle(
+                    &D2D_RECT_F {
+                        left: stx - 1.0,
+                        top: text_y,
+                        right: stx + self.text.width_of(&search_text) + 1.0,
+                        bottom: text_y + lh,
+                    },
+                    &sel,
+                );
+            }
+            // The placeholder stands aside for the caret rather than sitting
+            // under it; typed text starts at the box's edge as usual.
+            let placeholder_gap = if searching { 0.0 } else { 7.0 };
             let layout = self.text.volatile(&search_text)?;
             dc.DrawTextLayout(
-                Vector2 { X: search_x + PAD * 0.7, Y: text_y },
+                Vector2 { X: stx + placeholder_gap, Y: text_y },
                 &layout,
                 if searching { &fg } else { &faint },
                 D2D1_DRAW_TEXT_OPTIONS_NONE,
             );
+            // A blinking caret here even when nothing has been typed: this
+            // box takes every keystroke the dialog does not claim, and a
+            // grey word alone reads as a label rather than as an invitation.
+            // It steps aside while the address bar is the one being typed in
+            // — two carets would be two claims on the same keyboard.
+            if caret_on && address.is_none() {
+                let caret_x = if searching {
+                    stx + self.text.width_of(&search_text) + 1.0
+                } else {
+                    stx
+                };
+                let caret = dc.CreateSolidColorBrush(&themed(theme.accent, 0.95), None)?;
+                dc.FillRectangle(
+                    &D2D_RECT_F {
+                        left: caret_x,
+                        top: text_y,
+                        right: caret_x + 2.0,
+                        bottom: text_y + lh,
+                    },
+                    &caret,
+                );
+            }
             dc.FillRectangle(
                 &D2D_RECT_F { left: x, top: y + toolbar_h, right: x + width, bottom: y + toolbar_h + 1.0 },
                 &edge,
@@ -1954,7 +2121,8 @@ impl Kubide {
             let place_bottom = y + height - footer_h;
             let mut place_hits: Vec<Option<std::path::PathBuf>> = Vec::new();
             let mut py = places_y0;
-            let mut draw_group = |title: &str, group: &[std::path::PathBuf],
+            let mut draw_group = |title: &str,
+                                  group: &[(std::path::PathBuf, String)],
                                   place_hits: &mut Vec<Option<std::path::PathBuf>>,
                                   py: &mut f32|
              -> Result<()> {
@@ -1965,28 +2133,22 @@ impl Kubide {
                 dc.DrawTextLayout(Vector2 { X: x + PAD, Y: *py }, &layout, &faint, D2D1_DRAW_TEXT_OPTIONS_NONE);
                 place_hits.push(None);
                 *py += lh;
-                for place in group {
+                for (place, name) in group {
                     if *py + lh > place_bottom {
                         break;
                     }
-                    if *place == current {
-                        let sel = dc.CreateSolidColorBrush(&themed(theme.accent, 0.18), None)?;
+                    let row_rect = D2D_RECT_F { left: x + PAD * 0.4, top: *py, right: x + rail_w - PAD * 0.4, bottom: *py + lh };
+                    let hovered =
+                        mx >= row_rect.left && mx < row_rect.right && my >= *py && my < *py + lh;
+                    if *place == current || hovered {
+                        let a = if *place == current { 0.18 } else { 0.10 };
+                        let sel = dc.CreateSolidColorBrush(&themed(theme.accent, a), None)?;
                         dc.FillRoundedRectangle(
-                            &D2D1_ROUNDED_RECT {
-                                rect: D2D_RECT_F { left: x + PAD * 0.4, top: *py, right: x + rail_w - PAD * 0.4, bottom: *py + lh },
-                                radiusX: 5.0,
-                                radiusY: 5.0,
-                            },
+                            &D2D1_ROUNDED_RECT { rect: row_rect, radiusX: 5.0, radiusY: 5.0 },
                             &sel,
                         );
                     }
-                    let name = place
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| {
-                            place.display().to_string().trim_end_matches('\\').to_string()
-                        });
-                    let layout = self.text.line(&name)?;
+                    let layout = self.text.line(name)?;
                     dc.DrawTextLayout(
                         Vector2 { X: x + PAD * 1.6, Y: *py },
                         &layout,
@@ -2052,14 +2214,14 @@ impl Kubide {
             for (i, (row, hits)) in rows.iter().enumerate() {
                 let ry = list_y0 + i as f32 * lh;
                 let picked = Some(i) == selected_row;
-                if picked {
-                    let sel = dc.CreateSolidColorBrush(&themed(theme.accent, 0.18), None)?;
+                let row_rect = D2D_RECT_F { left: list_x - PAD * 0.5, top: ry, right: x + width - PAD * 0.5, bottom: ry + lh };
+                let hovered =
+                    mx >= row_rect.left && mx < row_rect.right && my >= ry && my < ry + lh;
+                if picked || hovered {
+                    let a = if picked { 0.18 } else { 0.10 };
+                    let sel = dc.CreateSolidColorBrush(&themed(theme.accent, a), None)?;
                     dc.FillRoundedRectangle(
-                        &D2D1_ROUNDED_RECT {
-                            rect: D2D_RECT_F { left: list_x - PAD * 0.5, top: ry, right: x + width - PAD * 0.5, bottom: ry + lh },
-                            radiusX: 5.0,
-                            radiusY: 5.0,
-                        },
+                        &D2D1_ROUNDED_RECT { rect: row_rect, radiusX: 5.0, radiusY: 5.0 },
                         &sel,
                     );
                 }
@@ -2157,7 +2319,10 @@ impl Kubide {
             let layout = self.text.volatile(&field_text)?;
             dc.DrawTextLayout(Vector2 { X: field_x + PAD * 0.7, Y: bty }, &layout, &fg, D2D1_DRAW_TEXT_OPTIONS_NONE);
 
-            let accent_fill = dc.CreateSolidColorBrush(&themed(theme.accent, 0.22), None)?;
+            let over_open =
+                mx >= open_x && mx < open_x + open_w && my >= by && my < by + bh;
+            let accent_fill =
+                dc.CreateSolidColorBrush(&themed(theme.accent, if over_open { 0.34 } else { 0.22 }), None)?;
             let open_rect = D2D1_ROUNDED_RECT {
                 rect: D2D_RECT_F { left: open_x, top: by, right: open_x + open_w, bottom: by + bh },
                 radiusX: 6.0,
@@ -2167,6 +2332,17 @@ impl Kubide {
             dc.DrawRoundedRectangle(&open_rect, &hit, 1.0, None);
             let layout = self.text.volatile(open_label)?;
             dc.DrawTextLayout(Vector2 { X: open_x + PAD, Y: bty }, &layout, &fg, D2D1_DRAW_TEXT_OPTIONS_NONE);
+            if mx >= cancel_x && mx < cancel_x + cancel_w && my >= by && my < by + bh {
+                let hover = dc.CreateSolidColorBrush(&themed(theme.fg, 0.08), None)?;
+                dc.FillRoundedRectangle(
+                    &D2D1_ROUNDED_RECT {
+                        rect: D2D_RECT_F { left: cancel_x, top: by, right: cancel_x + cancel_w, bottom: by + bh },
+                        radiusX: 6.0,
+                        radiusY: 6.0,
+                    },
+                    &hover,
+                );
+            }
             boxed(cancel_x, by, cancel_w, bh)?;
             let layout = self.text.volatile(cancel_label)?;
             dc.DrawTextLayout(Vector2 { X: cancel_x + PAD, Y: bty }, &layout, &dim, D2D1_DRAW_TEXT_OPTIONS_NONE);
@@ -2177,6 +2353,7 @@ impl Kubide {
                 panel: kb_ui::Rect::new(x, y, width, height),
                 crumb_y: (btn_y, btn_y + btn),
                 crumbs: crumb_hits,
+                addr_x: (addr_x, addr_x + addr_w),
                 places_y0,
                 places_x: (x, x + rail_w),
                 places: place_hits,
@@ -2233,13 +2410,14 @@ impl Kubide {
         let theme = self.cfg.theme;
         let note = p.note.clone();
         let selected = p.selected;
+        let blinking = self.caret_on();
 
         unsafe {
             // Translucent, not a slab. The window is acrylic and the whole
             // look rests on things sitting *in* that material; an opaque panel
             // over a blurred backdrop reads as a dialog bolted onto something
             // else.
-            let bg = dc.CreateSolidColorBrush(&themed(theme.overlay, 1.0), None)?;
+            let bg = dc.CreateSolidColorBrush(&overlay(theme.overlay), None)?;
             // A hairline, the same one the pane dividers use. An accent-blue
             // outline makes the frame the loudest thing on screen, which is
             // backwards — the list is what matters, not its edge.
@@ -2289,17 +2467,21 @@ impl Kubide {
                 D2D1_DRAW_TEXT_OPTIONS_NONE,
             );
 
-            // A caret after the query, so an empty box still looks like input.
-            let caret_x = x + PAD + label_w + self.text.width_of(&query) + 1.0;
-            dc.FillRectangle(
-                &D2D_RECT_F {
-                    left: caret_x,
-                    top: y + lh * 0.55,
-                    right: caret_x + 2.0,
-                    bottom: y + lh * 1.45,
-                },
-                &hit,
-            );
+            // A caret after the query, so an empty box still looks like
+            // input — blinking, because a bar that never moves reads as a
+            // rule someone drew rather than as a box waiting for a word.
+            if blinking {
+                let caret_x = x + PAD + label_w + self.text.width_of(&query) + 1.0;
+                dc.FillRectangle(
+                    &D2D_RECT_F {
+                        left: caret_x,
+                        top: y + lh * 0.55,
+                        right: caret_x + 2.0,
+                        bottom: y + lh * 1.45,
+                    },
+                    &hit,
+                );
+            }
 
             // Hairline under the input: it separates what you type from what
             // the typing produced, which is the one distinction in the box.
@@ -2529,7 +2711,7 @@ impl Kubide {
 
         let theme = self.cfg.theme;
         unsafe {
-            let bg = dc.CreateSolidColorBrush(&themed(theme.overlay, 0.94), None)?;
+            let bg = dc.CreateSolidColorBrush(&overlay(theme.overlay), None)?;
             let edge = dc.CreateSolidColorBrush(&themed(theme.accent, 0.4), None)?;
             let key = dc.CreateSolidColorBrush(&themed(theme.accent, 0.95), None)?;
             let label = dc.CreateSolidColorBrush(&themed(theme.fg, 0.85), None)?;

@@ -101,6 +101,9 @@ pub struct WindowConfig {
     /// Height of the draggable strip, at 96 DPI.
     pub caption_h: i32,
     pub backdrop: Backdrop,
+    /// Where a previous run left the window. `None` lets Windows choose,
+    /// which is what a first run wants.
+    pub place: Option<Placement>,
 }
 
 impl Default for WindowConfig {
@@ -111,20 +114,550 @@ impl Default for WindowConfig {
             height: 800,
             caption_h: 40,
             backdrop: Backdrop::Acrylic,
+            place: None,
         }
     }
 }
 
-/// Cursor shapes the app can ask for.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+/// A window's size and position, in physical screen pixels, plus whether it
+/// was maximized.
+///
+/// The rectangle is always the *restored* one even when `maximized` is set:
+/// that is what un-maximizing has to go back to, and remembering a maximized
+/// window as a screen-sized normal one loses the state and the size at once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Placement {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+    pub maximized: bool,
+}
+
+/// Where the window is now, ready to be written down for the next run.
+///
+/// `GetWindowPlacement` rather than `GetWindowRect` because it reports the
+/// restored rectangle while the window is maximized, which is the whole
+/// difficulty of saving a window's place.
+pub fn placement(hwnd: HWND) -> Option<Placement> {
+    let mut wp = WINDOWPLACEMENT {
+        length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
+        ..Default::default()
+    };
+    unsafe { GetWindowPlacement(hwnd, &mut wp).ok()? };
+    let r = wp.rcNormalPosition;
+    let (width, height) = (r.right - r.left, r.bottom - r.top);
+    // A minimized window reports a placement worth keeping, but a degenerate
+    // rectangle is not worth restoring anyone into.
+    (width > 0 && height > 0).then_some(Placement {
+        x: r.left,
+        y: r.top,
+        width,
+        height,
+        maximized: wp.showCmd == SW_SHOWMAXIMIZED.0 as u32,
+    })
+}
+
+/// Whether a saved rectangle still lands on a monitor that exists.
+///
+/// Monitors get unplugged. A window restored onto the coordinates of a screen
+/// that is no longer there is invisible, and an invisible window reads as a
+/// program that failed to start.
+fn on_screen(p: Placement) -> bool {
+    let rect = RECT { left: p.x, top: p.y, right: p.x + p.width, bottom: p.y + p.height };
+    use windows::Win32::Graphics::Gdi::{MonitorFromRect, MONITOR_DEFAULTTONULL};
+    !unsafe { MonitorFromRect(&rect, MONITOR_DEFAULTTONULL) }.is_invalid()
+}
+
+/// Cursor shapes the app can ask for. `Clone` but not `Copy`: the file
+/// variant carries a path.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub enum CursorShape {
     #[default]
     Arrow,
+    /// The system I-beam, drawn over editable text.
+    Text,
+    /// The system hand, over things that are clicked rather than typed in.
+    Hand,
+    /// A pointer drawn by us — shape, size and colour all the app's choice —
+    /// so the cursor wears the theme like everything else in the window.
+    ///
+    /// Built once per description and cached; a theme or setting change just
+    /// asks for a new one. If Windows refuses to make it, the nearest system
+    /// pointer stands in — a cursor must never simply vanish.
+    Themed(ThemedCursor),
+    /// A `.cur` or `.ani` file from disk — any cursor pack the user likes
+    /// better than our drawings. `fallback` is the drawn shape that stands
+    /// in when the file refuses to load.
+    File {
+        path: std::path::PathBuf,
+        fallback: ThemedCursor,
+    },
     /// Vertical divider — horizontal resize.
     SizeWE,
     /// Horizontal divider — vertical resize.
     SizeNS,
-    Text,
+}
+
+/// Asks the window to re-evaluate the cursor right now.
+///
+/// Windows only re-queries WM_SETCURSOR when the mouse moves, so a theme
+/// switch would otherwise wear the old colour until the hand twitches.
+pub fn refresh_cursor(hwnd: HWND) {
+    unsafe {
+        let _ = SendMessageW(
+            hwnd,
+            WM_SETCURSOR,
+            Some(WPARAM(hwnd.0 as usize)),
+            Some(LPARAM(HTCLIENT as isize)),
+        );
+    }
+}
+
+/// A custom pointer, fully described. `Hash + Eq` because the description is
+/// also the cache key.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct ThemedCursor {
+    pub kind: ThemedKind,
+    /// Canvas edge in pixels, clamped to 12..=128. `0` follows the system
+    /// cursor size, which is where the accessibility setting lives.
+    pub size: u16,
+    /// `0xRRGGBB`.
+    pub rgb: u32,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum ThemedKind {
+    /// The classic pointer, redrawn slimmer and softer than the system's.
+    Arrow,
+    /// A four-point dart — nothing like the stock pointer, on purpose.
+    Dart,
+    /// Just the tip — a minimal sliver of a pointer.
+    Triangle,
+    /// The TempleOS pointer, hard pixels and all. RIP Terry.
+    Temple,
+    /// Stem and serifs, for text.
+    IBeam,
+    /// The stem alone.
+    Bar,
+    /// A pointing hand, for things that are clicked rather than typed in.
+    Hand,
+    /// Double-headed ↔, for dragging a vertical divider.
+    SizeWE,
+    /// Double-headed ↕, for dragging a horizontal divider.
+    SizeNS,
+}
+
+/// Builds a pointer from its description, hand-plotted into a 32-bit DIB.
+///
+/// Drawn rather than loaded from a resource: the colour comes from a theme
+/// file we have never seen and the size from a setting, so there is nothing
+/// to bake at compile time. The shape is laid down as a boolean mask, then
+/// ringed with a one-pixel dark outline by dilation — an accent-coloured
+/// pointer over code in the same accent would otherwise be invisible exactly
+/// where it is pointing.
+///
+/// Returns an invalid handle when any GDI call refuses; the caller falls
+/// back to the nearest system pointer rather than showing none at all.
+fn themed_cursor(t: ThemedCursor) -> HCURSOR {
+    unsafe {
+        // SM_CXCURSOR tracks the accessibility cursor-size setting, so `0`
+        // means "as big as the user asked Windows for".
+        let s = match t.size {
+            0 => GetSystemMetrics(SM_CXCURSOR).max(16),
+            n => (n as i32).clamp(12, 128),
+        };
+        // The Temple pointer is pixel art and skips the whole smooth
+        // pipeline below — anti-aliasing it would be vandalism.
+        if t.kind == ThemedKind::Temple {
+            return temple_cursor(s, t.rgb);
+        }
+        let w = s as usize;
+        let k = s as f32;
+
+        // The shape as a signed distance: negative inside, in pixels. One
+        // function instead of a boolean mask because everything that makes a
+        // pointer look finished falls out of it — anti-aliased edges from the
+        // zero crossing, the dark ring from a one-pixel band outside, the
+        // soft shadow from the same field sampled at an offset. A hard mask
+        // gives staircased diagonals, which is exactly the cheap look this
+        // replaces.
+        let dist_seg = |px_: f32, py_: f32, ax: f32, ay: f32, bx: f32, by: f32| -> f32 {
+            let (dx, dy) = (bx - ax, by - ay);
+            let len2 = dx * dx + dy * dy;
+            let t_ = if len2 == 0.0 {
+                0.0
+            } else {
+                (((px_ - ax) * dx + (py_ - ay) * dy) / len2).clamp(0.0, 1.0)
+            };
+            let (ex, ey) = (px_ - (ax + t_ * dx), py_ - (ay + t_ * dy));
+            (ex * ex + ey * ey).sqrt()
+        };
+
+        // Signed distance to a polygon given in pixels: even-odd for the
+        // sign, nearest edge for the magnitude.
+        let poly_sd = move |qx: f32, qy: f32, pts: &[(f32, f32)]| -> f32 {
+            let n = pts.len();
+            let mut inside = false;
+            let mut d = f32::MAX;
+            for i in 0..n {
+                let (x1, y1) = pts[i];
+                let (x2, y2) = pts[(i + 1) % n];
+                if (y1 > qy) != (y2 > qy) && qx < (x2 - x1) * (qy - y1) / (y2 - y1) + x1 {
+                    inside = !inside;
+                }
+                d = d.min(dist_seg(qx, qy, x1, y1, x2, y2));
+            }
+            if inside {
+                -d
+            } else {
+                d
+            }
+        };
+
+        // Hotspot first; the field closure needs the same offsets.
+        let o = (k * 0.08).max(2.0); // margin so ring and shadow stay on canvas
+        let (hx, hy) = match t.kind {
+            ThemedKind::Arrow | ThemedKind::Dart | ThemedKind::Triangle => (o as i32, o as i32),
+            // The hand points with its fingertip, where the reference
+            // cursor puts it: just inside the tip, not on its outline.
+            ThemedKind::Hand => ((k * 0.492) as i32, (k * 0.281) as i32),
+            // Everything else points from its middle.
+            _ => (s / 2, s / 2),
+        };
+
+        let kind = t.kind;
+        let sd = move |px_: f32, py_: f32| -> f32 {
+            match kind {
+                // Returned before the field is ever built; the arm exists
+                // for the compiler, not the pixels.
+                ThemedKind::Temple => f32::MAX,
+                // Capsule strokes — segments with a radius — so the stem and
+                // serifs get rounded ends instead of sawn-off ones.
+                ThemedKind::IBeam | ThemedKind::Bar => {
+                    let cx = k * 0.5;
+                    let r = (k / 40.0).max(0.7); // hairline, kept visible
+                    let (top, bottom) = (k * 0.30, k * 0.70);
+                    let serif = (k / 11.0).max(1.5);
+                    let mut d = dist_seg(px_, py_, cx, top, cx, bottom) - r;
+                    if kind == ThemedKind::IBeam {
+                        d = d
+                            .min(dist_seg(px_, py_, cx - serif, top, cx + serif, top) - r)
+                            .min(dist_seg(px_, py_, cx - serif, bottom, cx + serif, bottom) - r);
+                    }
+                    d
+                }
+                ThemedKind::Arrow | ThemedKind::Dart | ThemedKind::Triangle => {
+                    // The arrow deliberately does not trace the stock
+                    // Windows silhouette: the left edge runs longer, the
+                    // notch sits higher and the tail is slimmer, so at a
+                    // glance it reads as this program's pointer and not the
+                    // system's in a costume. The dart shares nothing with
+                    // it at all.
+                    let pts: &[(f32, f32)] = match kind {
+                        // The classic solid pointer — near-vertical left
+                        // edge, angled shoulder, a proper notched tail.
+                        // Filled body with the outline on the other side of
+                        // the lightness is the whole look.
+                        ThemedKind::Arrow => &[
+                            (0.00, 0.00),
+                            (0.00, 0.517),
+                            (0.124, 0.396),
+                            (0.196, 0.559),
+                            (0.284, 0.520),
+                            (0.211, 0.360),
+                            (0.377, 0.360),
+                        ],
+                        ThemedKind::Dart => {
+                            &[(0.00, 0.00), (0.30, 0.115), (0.16, 0.16), (0.115, 0.30)]
+                        }
+                        _ => &[(0.00, 0.00), (0.34, 0.24), (0.10, 0.38)],
+                    };
+                    let scaled: Vec<(f32, f32)> =
+                        pts.iter().map(|(x, y)| (x * k + o, y * k + o)).collect();
+                    // Dilating the field by a hair rounds every corner —
+                    // the difference between clip-art and something drawn.
+                    poly_sd(px_, py_, &scaled) - (k * 0.015).max(0.4)
+                }
+                // The classic link hand, as one traced silhouette rather
+                // than a heap of capsules — capsules gave a mitten, because
+                // a hand is its outline and an outline is what they cannot
+                // make. Walked once: up the index finger, over the three
+                // folded knuckles, down the outside of the palm, across the
+                // cuff, and back up past the thumb.
+                ThemedKind::Hand => {
+                    // Proportioned off a decoded professional cursor rather
+                    // than from imagination: a fist seen from its thumb
+                    // side, one short finger raised, occupying about three
+                    // fifths of the canvas and sitting low in it. An earlier
+                    // pass drew the hand nearly canvas-tall with grooves
+                    // between the knuckles; at this size that reads as a
+                    // mitten with scratches, and the reference has neither.
+                    const HAND: &[(f32, f32)] = &[
+                        (0.437, 0.250), // index, left of the tip
+                        (0.455, 0.219),
+                        (0.530, 0.219),
+                        (0.552, 0.250), // index, right of the tip
+                        (0.552, 0.372),
+                        (0.630, 0.392), // knuckles, swelling right
+                        (0.722, 0.420),
+                        (0.795, 0.452),
+                        (0.812, 0.500), // the outside edge of the fist
+                        (0.812, 0.790),
+                        (0.440, 0.790), // the cuff
+                        (0.410, 0.745),
+                        (0.340, 0.665), // heel of the hand
+                        (0.278, 0.590),
+                        (0.250, 0.530), // thumb
+                        (0.250, 0.462),
+                        (0.300, 0.432),
+                        (0.395, 0.418),
+                        (0.437, 0.400), // back up to the index
+                    ];
+                    let scaled: Vec<(f32, f32)> =
+                        HAND.iter().map(|(x, y)| (x * k, y * k)).collect();
+                    poly_sd(px_, py_, &scaled) - (k * 0.014).max(0.4)
+                }
+                // A rounded shaft with a triangular head at each end,
+                // centred, replacing the system's double arrows over the
+                // pane dividers.
+                ThemedKind::SizeWE | ThemedKind::SizeNS => {
+                    // Drawn horizontal; the NS variant just swaps the axes.
+                    let (qx, qy) = if kind == ThemedKind::SizeWE {
+                        (px_, py_)
+                    } else {
+                        (py_, px_)
+                    };
+                    let c = k * 0.5;
+                    let r = (k / 36.0).max(0.8);
+                    let half = k * 0.26; // tip to centre
+                    let head = k * 0.13; // head length
+                    let hw = (k * 0.085).max(1.5); // head half-width
+                    let shaft =
+                        dist_seg(qx, qy, c - half + head * 0.7, c, c + half - head * 0.7, c) - r;
+                    let left =
+                        [(c - half, c), (c - half + head, c - hw), (c - half + head, c + hw)];
+                    let right =
+                        [(c + half, c), (c + half - head, c - hw), (c + half - head, c + hw)];
+                    shaft.min(poly_sd(qx, qy, &left)).min(poly_sd(qx, qy, &right))
+                }
+            }
+        };
+
+        // Three layers out of one field, bottom to top: a soft shadow the
+        // shape casts down-right, a ring hugging the edge, the body in the
+        // asked-for colour. The ring takes whichever side of the lightness
+        // the body did not — white around a near-black arrow, dark around an
+        // accent one — so no colour can dress a cursor that disappears.
+        // Premultiplied alpha throughout, which is what an alpha cursor's
+        // DIB has to hold anyway.
+        let (br, bg, bb) = (
+            ((t.rgb >> 16) & 0xFF) as f32 / 255.0,
+            ((t.rgb >> 8) & 0xFF) as f32 / 255.0,
+            (t.rgb & 0xFF) as f32 / 255.0,
+        );
+        let lum = 0.299 * br + 0.587 * bg + 0.114 * bb;
+        let (ring_v, ring_strength) = if lum < 0.45 {
+            // A light ring needs more presence than a dark one to read.
+            (1.0f32, 0.9f32)
+        } else {
+            (0.0f32, 0.6f32)
+        };
+        let mut px = vec![0u32; w * w];
+        for y in 0..s {
+            for x in 0..s {
+                let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
+                let d = sd(fx, fy);
+
+                let body_a = (0.5 - d).clamp(0.0, 1.0);
+                // The ring fades over a pixel; multiplied down so it reads
+                // as an edge, not a border.
+                let ring_a = (1.6 - d).clamp(0.0, 1.0) * ring_strength;
+                let dsh = sd(fx - 1.2, fy - 1.6);
+                let shadow_a = 0.22 * ((2.4 - dsh) / 2.4).clamp(0.0, 1.0);
+
+                // Shadow, then ring over it, then body over both. The
+                // shadow is always dark; only the ring switches sides.
+                let mut a = shadow_a;
+                let mut r = ring_v * ring_a;
+                let mut g = ring_v * ring_a;
+                let mut b = ring_v * ring_a;
+                a = ring_a + a * (1.0 - ring_a);
+                r = br * body_a + r * (1.0 - body_a);
+                g = bg * body_a + g * (1.0 - body_a);
+                b = bb * body_a + b * (1.0 - body_a);
+                a = body_a + a * (1.0 - body_a);
+
+                px[y as usize * w + x as usize] = ((a * 255.0) as u32) << 24
+                    | (((r * 255.0) as u32) << 16)
+                    | (((g * 255.0) as u32) << 8)
+                    | ((b * 255.0) as u32);
+            }
+        }
+
+        cursor_from_pixels(&px, s, hx, hy)
+    }
+}
+
+/// Wraps a premultiplied-BGRA pixel square into a real Windows cursor.
+///
+/// Returns an invalid handle when any GDI call refuses.
+fn cursor_from_pixels(px: &[u32], s: i32, hx: i32, hy: i32) -> HCURSOR {
+    use windows::Win32::Graphics::Gdi::{
+        CreateBitmap, CreateDIBSection, DeleteObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+        DIB_RGB_COLORS,
+    };
+    unsafe {
+        let w = s as usize;
+        let bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: s,
+                biHeight: -s, // top-down, so the pixel vec maps straight in
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
+        let Ok(colour_bmp) = CreateDIBSection(None, &bmi, DIB_RGB_COLORS, &mut bits, None, 0)
+        else {
+            return HCURSOR::default();
+        };
+        if bits.is_null() {
+            let _ = DeleteObject(colour_bmp.into());
+            return HCURSOR::default();
+        }
+        std::ptr::copy_nonoverlapping(px.as_ptr(), bits.cast::<u32>(), w * w);
+
+        // The mask is required by the API and mostly ignored in favour of
+        // the alpha channel — but "mostly" is doing work there. Created with
+        // no bits its contents are undefined, and an undefined AND mask is a
+        // cursor that renders as noise on some drivers. Zeroed explicitly.
+        // Scan lines of a CreateBitmap bitmap are word-aligned.
+        let mask_row_bytes = (s as usize).div_ceil(16) * 2;
+        let mask_bits = vec![0u8; mask_row_bytes * s as usize];
+        let mask_bmp = CreateBitmap(s, s, 1, 1, Some(mask_bits.as_ptr().cast()));
+
+        let info = ICONINFO {
+            fIcon: FALSE, // a cursor, so the hotspot fields matter
+            xHotspot: hx as u32,
+            yHotspot: hy as u32,
+            hbmMask: mask_bmp,
+            hbmColor: colour_bmp,
+        };
+        let icon = CreateIconIndirect(&info);
+        // CreateIconIndirect copies the bitmaps; ours must not outlive this.
+        let _ = DeleteObject(colour_bmp.into());
+        let _ = DeleteObject(mask_bmp.into());
+        match icon {
+            Ok(i) => HCURSOR(i.0),
+            Err(_) => HCURSOR::default(),
+        }
+    }
+}
+
+/// The TempleOS mouse pointer, in loving memory of Terry A. Davis.
+///
+/// Traced from the original: a ↖ built from a corner — one arm along the
+/// top, one down the left, a filled wedge in the crook — a diagonal shaft
+/// running to the south-east, and the signature dotted crosshair ticks
+/// escaping past the tip. Drawn on a 28-cell grid scaled by whole pixels,
+/// with NO anti-aliasing and NO shadow: TempleOS was 640x480 with 16
+/// colours because God said so, and smoothing its cursor would be missing
+/// the entire point.
+fn temple_cursor(s: i32, rgb: u32) -> HCURSOR {
+    const GRID: i32 = 28;
+    // (x, y) cells that are lit, tip at (6, 6).
+    let mut cells: Vec<(i32, i32)> = Vec::new();
+    for d in [0, 2, 4] {
+        cells.push((6, d)); // dotted tick, up from the tip
+        cells.push((d, 6)); // and left
+    }
+    for i in 6..=16 {
+        cells.push((i, 6)); // top arm
+        cells.push((6, i)); // left arm
+    }
+    // The wedge in the crook of the corner.
+    for (x, y) in [(7, 7), (8, 7), (9, 7), (7, 8), (8, 8), (7, 9)] {
+        cells.push((x, y));
+    }
+    for i in 7..=26 {
+        cells.push((i, i)); // the shaft, running south-east
+    }
+
+    let cell = (s / GRID).max(1);
+    let w = s as usize;
+    let mut lit = vec![false; w * w];
+    let mut set = |x: i32, y: i32| {
+        if x >= 0 && y >= 0 && x < s && y < s {
+            lit[y as usize * w + x as usize] = true;
+        }
+    };
+    for (cx, cy) in cells {
+        for dy in 0..cell {
+            for dx in 0..cell {
+                set(cx * cell + dx, cy * cell + dy);
+            }
+        }
+    }
+
+    // Body flat, rim hard: one pixel of near-black around every lit pixel,
+    // no gradients anywhere. The rim is not authentic — TempleOS drew over
+    // its own wallpaper and could afford to vanish — but a pointer here has
+    // to survive every theme, and it stays as blocky as the rest.
+    let body = 0xFF_00_00_00u32
+        | ((rgb >> 16) & 0xFF) << 16
+        | ((rgb >> 8) & 0xFF) << 8
+        | (rgb & 0xFF);
+    let rim = 0xE6_00_00_00u32;
+    let mut px = vec![0u32; w * w];
+    for y in 0..s {
+        for x in 0..s {
+            let i = y as usize * w + x as usize;
+            if lit[i] {
+                px[i] = body;
+            } else {
+                let ringed = (-1..=1).any(|dy| {
+                    (-1..=1).any(|dx| {
+                        let (nx, ny) = (x + dx, y + dy);
+                        nx >= 0 && ny >= 0 && nx < s && ny < s && lit[ny as usize * w + nx as usize]
+                    })
+                });
+                if ringed {
+                    px[i] = rim;
+                }
+            }
+        }
+    }
+
+    let hot = 6 * cell + cell / 2;
+    cursor_from_pixels(&px, s, hot, hot)
+}
+
+/// Loads a `.cur` or `.ani` from disk at the system cursor size.
+///
+/// `LoadImageW` rather than parsing anything ourselves: Windows already
+/// knows its own cursor formats, hotspots and animation included. An
+/// unreadable file is an invalid handle, which the caller treats as "use
+/// the drawn shape instead".
+fn load_cursor_file(path: &std::path::Path) -> HCURSOR {
+    unsafe {
+        let wide_path = wide(&path.to_string_lossy());
+        match LoadImageW(
+            None,
+            PCWSTR(wide_path.as_ptr()),
+            IMAGE_CURSOR,
+            0,
+            0,
+            LR_LOADFROMFILE | LR_DEFAULTSIZE,
+        ) {
+            Ok(h) => HCURSOR(h.0),
+            Err(_) => HCURSOR::default(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -213,6 +746,14 @@ struct State {
     /// (SIGINT) to the shell, Ctrl+W leaks 0x17, Ctrl+T leaks 0x14. Consuming
     /// WM_KEYDOWN does not suppress WM_CHAR, so the flag is required.
     swallow_char: bool,
+    /// Custom pointers already built, by description. WM_SETCURSOR fires on
+    /// every mouse move, and building a cursor per move would be a leak with
+    /// a framerate.
+    themed_cursors: std::collections::HashMap<ThemedCursor, HCURSOR>,
+    /// Cursor files already loaded, by path. A failed load is cached too —
+    /// an invalid handle — so a missing file is one disk miss, not one per
+    /// mouse move.
+    file_cursors: std::collections::HashMap<std::path::PathBuf, HCURSOR>,
 }
 
 /// Button rects in client coordinates, laid out right to left. Windows uses
@@ -326,8 +867,17 @@ pub fn run(config: WindowConfig, handler: Box<dyn Handler>) -> Result<()> {
             active: true,
             tracking: false,
             swallow_char: false,
+            themed_cursors: std::collections::HashMap::new(),
+            file_cursors: std::collections::HashMap::new(),
         });
         let state_ptr = Box::into_raw(state);
+
+        // A remembered place, unless the monitor it named has since gone.
+        let place = config.place.filter(|p| on_screen(*p));
+        let (x, y, w, h) = match place {
+            Some(p) => (p.x, p.y, p.width, p.height),
+            None => (CW_USEDEFAULT, CW_USEDEFAULT, config.width, config.height),
+        };
 
         let title = wide(&config.title);
         let hwnd = CreateWindowExW(
@@ -339,10 +889,10 @@ pub fn run(config: WindowConfig, handler: Box<dyn Handler>) -> Result<()> {
             // WS_THICKFRAME is critical: rounded corners, shadow, snap and
             // resize edges all come free from DWM. WS_POPUP kills them.
             WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            config.width,
-            config.height,
+            x,
+            y,
+            w,
+            h,
             None,
             None,
             Some(instance.into()),
@@ -368,7 +918,10 @@ pub fn run(config: WindowConfig, handler: Box<dyn Handler>) -> Result<()> {
             0,
             SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
         );
-        let _ = ShowWindow(hwnd, SW_SHOW);
+        let _ = ShowWindow(
+            hwnd,
+            if place.is_some_and(|p| p.maximized) { SW_SHOWMAXIMIZED } else { SW_SHOW },
+        );
 
         // Terminal output arrives on its own schedule. Instead of rendering
         // continuously we poll at ~60 Hz and draw only on change, so an idle
@@ -829,11 +1382,50 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 // We only get a say inside the client area; on the edges
                 // DefWindowProc's resize cursors are the correct ones.
                 if (lparam.0 & 0xFFFF) as u32 == HTCLIENT {
-                    let id = match state.handler.cursor() {
+                    let shape = state.handler.cursor();
+                    // A file first, its drawn fallback second, the nearest
+                    // system pointer last. Each step only on the failure of
+                    // the one before, and every failure is cached.
+                    let mut themed = |t: ThemedCursor| -> Option<HCURSOR> {
+                        let c = *state
+                            .themed_cursors
+                            .entry(t)
+                            .or_insert_with(|| themed_cursor(t));
+                        (!c.is_invalid()).then_some(c)
+                    };
+                    let custom = match &shape {
+                        CursorShape::File { path, fallback } => {
+                            let c = *state
+                                .file_cursors
+                                .entry(path.clone())
+                                .or_insert_with(|| load_cursor_file(path));
+                            (!c.is_invalid()).then_some(c).or_else(|| themed(*fallback))
+                        }
+                        CursorShape::Themed(t) => themed(*t),
+                        _ => None,
+                    };
+                    if let Some(c) = custom {
+                        SetCursor(Some(c));
+                        return LRESULT(1);
+                    }
+                    let of_kind = |k: ThemedKind| match k {
+                        ThemedKind::IBeam | ThemedKind::Bar => IDC_IBEAM,
+                        ThemedKind::Arrow
+                        | ThemedKind::Dart
+                        | ThemedKind::Triangle
+                        | ThemedKind::Temple => IDC_ARROW,
+                        ThemedKind::Hand => IDC_HAND,
+                        ThemedKind::SizeWE => IDC_SIZEWE,
+                        ThemedKind::SizeNS => IDC_SIZENS,
+                    };
+                    let id = match &shape {
                         CursorShape::Arrow => IDC_ARROW,
                         CursorShape::SizeWE => IDC_SIZEWE,
                         CursorShape::SizeNS => IDC_SIZENS,
                         CursorShape::Text => IDC_IBEAM,
+                        CursorShape::Hand => IDC_HAND,
+                        CursorShape::Themed(t) => of_kind(t.kind),
+                        CursorShape::File { fallback, .. } => of_kind(fallback.kind),
                     };
                     if let Ok(c) = LoadCursorW(None, id) {
                         SetCursor(Some(c));
@@ -868,13 +1460,62 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 let p = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut State;
                 SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
                 if !p.is_null() {
-                    drop(Box::from_raw(p));
+                    let state = Box::from_raw(p);
+                    // Cursors we created or loaded are ours to destroy;
+                    // system ones from LoadCursorW never enter these maps.
+                    for cur in state.themed_cursors.values() {
+                        if !cur.is_invalid() {
+                            let _ = DestroyIcon(HICON(cur.0));
+                        }
+                    }
+                    for cur in state.file_cursors.values() {
+                        if !cur.is_invalid() {
+                            let _ = DestroyCursor(*cur);
+                        }
+                    }
+                    drop(state);
                 }
                 PostQuitMessage(0);
                 LRESULT(0)
             }
 
             _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_themed_cursor_actually_builds() {
+        // The window falls back to a system pointer when this returns an
+        // invalid handle, which looks exactly like the feature not existing.
+        // So the failure this guards against is silent by design, and only a
+        // test makes it loud. Every shape, at the follow-the-system size and
+        // at a pinned one.
+        for kind in [
+            ThemedKind::Arrow,
+            ThemedKind::Dart,
+            ThemedKind::Triangle,
+            ThemedKind::Temple,
+            ThemedKind::IBeam,
+            ThemedKind::Bar,
+            ThemedKind::Hand,
+            ThemedKind::SizeWE,
+            ThemedKind::SizeNS,
+        ] {
+            for size in [0u16, 20] {
+                let cur = themed_cursor(ThemedCursor { kind, size, rgb: 0x00c4a7e7 });
+                assert!(
+                    !cur.is_invalid(),
+                    "CreateIconIndirect refused {kind:?} at size {size}"
+                );
+                unsafe {
+                    let _ = DestroyIcon(HICON(cur.0));
+                }
+            }
         }
     }
 }

@@ -9,7 +9,7 @@ accent = "#c4a7e7"
 warning = "#f6c177"
 error = "#eb6f92"
 divider = "#e0def41a"
-overlay = "#191724e0"
+overlay = "#191724f2"
 
 [caption]
 fg = "#908caa"

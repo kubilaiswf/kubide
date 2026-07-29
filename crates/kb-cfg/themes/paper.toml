@@ -1,0 +1,67 @@
+# Paper for kubide — the one light theme.
+#
+# From colorhunt.co's F9F7F7 / DBE2EF / 3F72AF / 112D4E: paper white,
+# a wash of blue-grey, and ink in two depths. Fair warning from TODO.md:
+# light-over-a-bright-wallpaper has had less testing than the dark themes,
+# and the acrylic backdrop glows more the lighter the theme gets.
+
+fg = "#112d4e"        # main text — the palette's ink
+dim = "#6b83a2"       # labels, hints, line numbers
+accent = "#3f72af"    # focus, selection, highlights
+warning = "#b07d2b"
+error = "#c1443d"
+divider = "#112d4e1a" # pane hairline — mostly transparent on purpose
+overlay = "#f9f7f7f2" # the command palette's backdrop
+
+[caption]
+fg = "#6b83a2"
+icon = "#112d4e"
+hover = "#00000012"
+press = "#0000000a"
+close_hover = "#c1443dd9"
+close_press = "#9c322ce6"
+
+[terminal]
+background = "#f9f7f7" # cells of exactly this colour stay transparent
+foreground = "#112d4e"
+cursor = "#3f72afbf"
+selection = "#dbe2ef"
+
+[terminal.ansi]
+black = "#112d4e"
+red = "#c1443d"
+green = "#3e7a4e"
+yellow = "#b07d2b"
+blue = "#3f72af"
+magenta = "#8a4f9e"
+cyan = "#2e7f8a"
+white = "#dbe2ef"
+bright_black = "#3a5375"
+bright_red = "#d96b64"
+bright_green = "#5b9c6c"
+bright_yellow = "#cc984a"
+bright_blue = "#6293cd"
+bright_magenta = "#a873ba"
+bright_cyan = "#4da0ac"
+bright_white = "#f9f7f7"
+
+[git]
+modified = "#b07d2b"
+added = "#3e7a4e"
+deleted = "#c1443d"
+untracked = "#3f72af"
+conflicted = "#8a4f9e"
+
+[syntax]
+keyword = "#3f72af"
+function = "#2e7f8a"
+type = "#b07d2b"
+string = "#3e7a4e"
+number = "#8a4f9e"
+comment = "#8c9bb1"
+constant = "#8a4f9e"
+operator = "#112d4e"
+punctuation = "#6b83a2"
+variable = "#112d4e"
+property = "#33608f"
+attribute = "#b3592b"

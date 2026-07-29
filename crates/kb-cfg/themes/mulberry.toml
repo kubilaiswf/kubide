@@ -1,0 +1,66 @@
+# Mulberry for kubide.
+#
+# From colorhunt.co's 3A0519 / 670D2F / A53860 / EF88AD — wine-dark to
+# rose-bright, one hue deepening into itself. The greens and golds are
+# guests here, dressed to match.
+
+fg = "#f5dce6"        # main text
+dim = "#b3798f"       # labels, hints, line numbers
+accent = "#ef88ad"    # focus, selection, highlights
+warning = "#e6b566"
+error = "#f2546b"
+divider = "#f5dce61a" # pane hairline — mostly transparent on purpose
+overlay = "#3a0519f2" # the command palette's backdrop
+
+[caption]
+fg = "#b3798f"
+icon = "#f5dce6"
+hover = "#ffffff17"
+press = "#ffffff0d"
+close_hover = "#f2546bd9"
+close_press = "#c93a52e6"
+
+[terminal]
+background = "#3a0519" # cells of exactly this colour stay transparent
+foreground = "#f5dce6"
+cursor = "#ef88adbf"
+selection = "#670d2f"
+
+[terminal.ansi]
+black = "#3a0519"
+red = "#f2546b"
+green = "#8fbf8f"
+yellow = "#e6b566"
+blue = "#8f9fd6"
+magenta = "#a53860"
+cyan = "#82bdb4"
+white = "#dbb9c8"
+bright_black = "#7c4a5e"
+bright_red = "#ff7d8f"
+bright_green = "#aed6ae"
+bright_yellow = "#f2cc8a"
+bright_blue = "#adbce8"
+bright_magenta = "#ef88ad"
+bright_cyan = "#a1d4cc"
+bright_white = "#faeef3"
+
+[git]
+modified = "#e6b566"
+added = "#8fbf8f"
+deleted = "#f2546b"
+untracked = "#ef88ad"
+conflicted = "#8f9fd6"
+
+[syntax]
+keyword = "#ef88ad"
+function = "#a1d4cc"
+type = "#e6b566"
+string = "#aed6ae"
+number = "#d6a5f0"
+comment = "#7c4a5e"
+constant = "#d6a5f0"
+operator = "#f5dce6"
+punctuation = "#b3798f"
+variable = "#f5dce6"
+property = "#e0a9c0"
+attribute = "#ec9a6a"
