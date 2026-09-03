@@ -24,6 +24,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.97"
 
+# Windows: raw Win32, Direct2D and DirectWrite, nothing in between.
 [workspace.dependencies]
 windows-numerics = "0.3"
 
@@ -53,6 +54,47 @@ features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ]
+
+# Linux: there is no Direct2D to speak to directly, so the same seams are
+# filled by the smallest pure-Rust pieces that do one job each. winit opens
+# the window on X11 and Wayland alike (no toolkit, no client-side decoration
+# library — the caption is ours on every platform); tiny-skia rasterises the
+# few shapes draw.rs asks for; cosmic-text shapes and rasterises glyphs the
+# way DirectWrite does; softbuffer puts the frame on an X11 window, and the
+# Wayland presenter is written by hand in kb-gfx because softbuffer's drops
+# the alpha channel there. arboard is the clipboard on both display servers.
+[workspace.dependencies.winit]
+version = "0.30"
+default-features = false
+features = ["rwh_06", "x11", "wayland", "wayland-dlopen"]
+
+[workspace.dependencies.softbuffer]
+version = "0.4"
+default-features = false
+features = ["x11", "x11-dlopen"]
+
+[workspace.dependencies.arboard]
+version = "3"
+default-features = false
+features = ["wayland-data-control"]
+
+[workspace.dependencies.tiny-skia]
+version = "0.12"
+
+[workspace.dependencies.cosmic-text]
+version = "0.19"
+
+[workspace.dependencies.wayland-client]
+version = "0.31"
+
+[workspace.dependencies.raw-window-handle]
+version = "0.6"
+
+[workspace.dependencies.libc]
+version = "0.2"
+
+[workspace.dependencies.png]
+version = "0.18"
 
 [profile.release]
 opt-level = 3

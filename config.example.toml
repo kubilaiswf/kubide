@@ -1,6 +1,7 @@
 # kubide configuration
 #
-# Copy to %APPDATA%\kubide\config.toml and edit. Saving applies immediately —
+# Copy to %APPDATA%\kubide\config.toml (Windows) or ~/.config/kubide/config.toml
+# (Linux) and edit. Saving applies immediately —
 # no restart. Every value below is the default, so an empty file behaves the
 # same as this one.
 #
@@ -39,6 +40,9 @@
 # acrylic blurs whatever is behind the window. mica samples the wallpaper once
 # and is cheaper but opaque. All of them fall back to a flat color when Windows
 # has "Transparency effects" off, in Energy Saver, or in High Contrast.
+# On Linux the names pick the tint painted under the window (none is opaque);
+# the blur behind it is the compositor's job — Hyprland and KWin do it for
+# windows with alpha, GNOME does not.
 backdrop = "acrylic"
 
 # Height of the draggable title strip, and the gap around the pane area.
@@ -78,7 +82,7 @@ size = 14.0
 [terminal]
 # Leave shell unset for the system default. Changes apply to terminals opened
 # from here on; running ones are never restarted under you.
-# shell = "pwsh.exe"
+# shell = "pwsh.exe"        # Windows; on Linux $SHELL is the default, e.g. "fish"
 # args = ["-NoLogo"]
 
 # Scrollback lines. Without enough of it you can't see the top of a build log.

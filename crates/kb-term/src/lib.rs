@@ -174,6 +174,14 @@ impl Terminal {
             cell_height: opts.cell_h.max(1),
         };
 
+        // TERM and COLORTERM for the child, from the terminfo actually
+        // installed: `alacritty` when its entry exists, `xterm-256color`
+        // otherwise. Unix only — ConPTY sets its own environment, and a
+        // TERM leaking into a Windows process tree changes nothing for the
+        // better.
+        #[cfg(unix)]
+        tty::setup_env();
+
         let pty_options = tty::Options {
             shell: opts
                 .shell

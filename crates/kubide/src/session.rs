@@ -1,6 +1,6 @@
 //! Remembering the layout between runs.
 //!
-//! Stored per workspace under `%APPDATA%\kubide\sessions`, keyed by a hash of
+//! Stored per workspace under `sessions` in kubide's folder, keyed by a hash of
 //! the directory. One file per project rather than one big one, so a corrupt
 //! session costs you that project's layout and nothing else.
 //!
@@ -35,7 +35,7 @@ pub struct Session {
 /// A marked workspace keeps its own, inside the `.kubide` it already has: a
 /// project that is renamed or moved to another drive takes its layout with
 /// it, where a file keyed by the old path is simply lost. Everything else
-/// goes to `%APPDATA%`, hashed rather than derived from the path — a
+/// goes to kubide's own folder, hashed rather than derived from the path — a
 /// directory name can contain anything, including characters that are not
 /// legal in a file name, and escaping them correctly is more work than
 /// hashing.
@@ -44,9 +44,8 @@ pub fn path_for(root: &Path) -> Option<PathBuf> {
     if marked.is_dir() {
         return Some(marked.join("session"));
     }
-    let base = std::env::var_os("APPDATA").map(PathBuf::from)?;
     Some(
-        base.join("kubide")
+        kb_cfg::data_dir()
             .join("sessions")
             .join(format!("{:016x}.session", hash(&root.to_string_lossy()))),
     )
@@ -56,8 +55,7 @@ pub fn path_for(root: &Path) -> Option<PathBuf> {
 /// newest first. Plain text because it is a list of paths, and the welcome
 /// screen reading it must never be able to fail interestingly.
 fn recent_path() -> Option<PathBuf> {
-    let base = std::env::var_os("APPDATA").map(PathBuf::from)?;
-    Some(base.join("kubide").join("recent"))
+    Some(kb_cfg::data_dir().join("recent"))
 }
 
 /// The workspaces opened before, newest first — only the ones that still
@@ -103,8 +101,7 @@ pub fn note_workspace(dir: &Path) {
 /// the editor resizing itself. Plain text for the same reason the recents
 /// are — five numbers do not need a format.
 fn window_path() -> Option<PathBuf> {
-    let base = std::env::var_os("APPDATA").map(PathBuf::from)?;
-    Some(base.join("kubide").join("window"))
+    Some(kb_cfg::data_dir().join("window"))
 }
 
 /// The size and place the window was left at, if it was ever noted.
@@ -375,7 +372,8 @@ mod tests {
 
     #[test]
     fn a_file_from_outside_the_workspace_keeps_its_own_path() {
-        let outside = PathBuf::from("D:/notes/todo.md");
+        // A root that is not the workspace's on either platform.
+        let outside = PathBuf::from(if cfg!(windows) { "D:/notes/todo.md" } else { "/notes/todo.md" });
         let s = Session {
             layout: Desc::Leaf(PaneId(0)),
             panes: vec![(PaneId(0), Pane::File(outside.clone(), 0, 0))],

@@ -389,11 +389,36 @@ pub fn listing(dir: &Path) -> Vec<Entry> {
 ///
 /// Probed rather than remembered: a USB stick plugged in after startup is
 /// exactly the drive someone is about to want.
+#[cfg(windows)]
 pub fn drives() -> Vec<PathBuf> {
     (b'A'..=b'Z')
         .map(|l| PathBuf::from(format!("{}:\\", l as char)))
         .filter(|p| p.is_dir())
         .collect()
+}
+
+/// The places a Linux desktop calls "this PC": the root, then whatever is
+/// mounted where removable media lands — `/run/media/<user>`, `/media`,
+/// `/mnt` — each mount as its own row, the way a file manager's sidebar
+/// lists them. Probed on every open, like the drive letters.
+#[cfg(not(windows))]
+pub fn drives() -> Vec<PathBuf> {
+    let mut out = vec![PathBuf::from("/")];
+    let mut bays = vec![PathBuf::from("/media"), PathBuf::from("/mnt")];
+    if let Some(user) = std::env::var_os("USER") {
+        bays.insert(0, PathBuf::from("/run/media").join(user));
+    }
+    for bay in bays {
+        let Ok(entries) = std::fs::read_dir(&bay) else { continue };
+        let mut mounts: Vec<PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .collect();
+        mounts.sort();
+        out.extend(mounts);
+    }
+    out
 }
 
 /// The project `start` belongs to, if any.
@@ -461,7 +486,7 @@ pub fn distinct_labels(paths: &[PathBuf]) -> Vec<String> {
     let label_of = |i: usize, depth: &[usize]| -> String {
         let segs = &segments[i];
         let take = depth[i].min(segs.len()).max(1);
-        segs[segs.len().saturating_sub(take)..].join("\\")
+        segs[segs.len().saturating_sub(take)..].join(std::path::MAIN_SEPARATOR_STR)
     };
 
     // Bounded by the deepest path: every round grows a clashing row by one
@@ -562,7 +587,11 @@ impl Icons {
 mod tests {
     use super::*;
 
+    // The three label tests spell their paths with drive letters and
+    // backslashes, which only parse as roots and separators on Windows; the
+    // labelling itself is the same on both.
     #[test]
+    #[cfg(windows)]
     fn labels_grow_only_where_they_clash() {
         let paths: Vec<PathBuf> = [
             r"C:\work\kubide",
@@ -581,6 +610,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn labels_stop_growing_when_the_parents_run_out() {
         // Same last segment, same parent, different roots: the labels can only
         // separate at the drive, and must not loop trying to go further.
@@ -595,6 +625,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn a_drive_root_labels_itself_without_the_slash() {
         let paths: Vec<PathBuf> = [r"C:\", r"D:\"].iter().map(PathBuf::from).collect();
         assert_eq!(distinct_labels(&paths), ["C:", "D:"]);

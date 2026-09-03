@@ -4,5 +4,11 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
-[dependencies]
+[target.'cfg(windows)'.dependencies]
 windows.workspace = true
+
+# Shaping, font discovery and glyph rasterisation in one crate — the part of
+# DirectWrite this crate leans on. Its fontdb reads fontconfig's directories
+# and generic families, so `monospace` means what the desktop says it means.
+[target.'cfg(not(windows))'.dependencies]
+cosmic-text.workspace = true

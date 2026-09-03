@@ -37,7 +37,9 @@ Working notes. Roughly ordered by how much they'd change day-to-day use.
 ## Panes and files
 
 - **No tabs.** One pane holds one file. Opening a second file replaces the
-  first, which is why there are so many "unsaved changes" guards. Ctrl+Tab
+  first, which is why there are so many "unsaved changes" guards — every
+  way of opening one over unsaved work (tree, finder, picker) now asks
+  Save / Discard / Cancel in the same box closing a pane does. Ctrl+Tab
   now swaps the pane back to the file it held before — the piece of tabs
   worth having — but there is no picker over the whole recent list yet.
 - **Terminals are not restored** with a session. Deliberate — a shell is a live
@@ -64,6 +66,89 @@ Still missing from the panel:
 - Branches and stash. Fetch exists only as part of pull.
 - Discarding an untracked file (today: delete it in the tree instead).
 - A word-level diff highlight; the diff is line-level colour only.
+
+## Agent
+
+**The agent pane exists** (Ctrl+Shift+A): Claude Code in a pane. It is the
+`claude` CLI itself, spawned in print mode with stream-json on both ends —
+the seam the official editor extensions sit on — so CLAUDE.md, skills, MCP
+servers, hooks and the subscription login all apply exactly as in the
+terminal. The transcript streams; tool calls show as one row each with
+their result under them; a successful Edit/Write re-reads every clean
+editor from disk and nudges git and the tree. On a subscription the header
+shows the 5-hour and 7-day windows and when the short one resets, read
+from the CLI's `rate_limit_event`; the dollar estimate only appears with
+no windows in sight (an API key) or in paid overage.
+
+The control channel is wired: `--permission-prompt-tool stdio` turns the
+CLI's questions into `control_request` lines, and each comes up in the
+same choice box the editor uses for unsaved work, drawn inside the agent
+pane above its input — Allow, Always allow (the CLI's own suggested rule,
+saved to the project's `.claude/settings.local.json`), Deny; Esc is a no.
+Only the focused agent pane answers: the box takes Left/Right/Enter/Esc
+from that pane and nothing else, so a question can never be answered by
+a keystroke meant for the editor next to it. Esc in the pane sends
+`interrupt`, which ends the turn cleanly and keeps the process; a second
+Esc kills it, and the next Enter resumes the session. A message typed
+mid-turn queues and goes out when the turn ends. `/mode plan` and
+`/model x` switch the session in place; other slash commands go to the
+CLI. Typing `/` lists what is on offer — the pane's own three, then the
+skills and commands found under `.claude/` in the home folder and the
+project — with Up/Down, Tab or Enter to take one; the CLI's built-ins
+(`/compact` and friends) are not listed because whether they work in
+print mode has not been checked. None of this channel is in the CLI's documentation — it is what the
+TypeScript SDK speaks, checked against 2.1.258 — so pin the CLI version
+before a release. `[agent]` in the user config picks the executable,
+model, permission mode and `--allowedTools`; a workspace `.kubide` file
+cannot, because a clone must not grant itself anything.
+
+Still missing:
+
+- **The question shows one line.** A multi-line command or an edit's
+  diff needs a bigger box than the choice box draws today.
+- **Plan-mode approval** (`ExitPlanMode`) comes through the same channel
+  and gets the generic "Use a tool?" wording.
+- **Not restored** with a session, like terminals. The session id is known,
+  so a "there was a conversation here — Enter resumes it" pane is possible.
+- **One line of input.** Multi-line prompts get flattened on paste.
+- **Markdown is drawn raw.** Fences and lists read fine in a monospace
+  pane; headings and emphasis show their markers.
+- **No selection context.** "This function" means nothing to it yet; the
+  next step is folding the focused file and selection into the message,
+  then a small stdio MCP server via `--mcp-config` for open/selection.
+- **No copy** out of the transcript.
+
+## Vim
+
+**Vim mode exists** (`[vim] enabled`, or "Vim mode on or off" from F1). It
+is the `kb-vim` crate: a grammar over the buffer, tested without a window
+(`cargo test -p kb-vim`, 118 cases written as key sequences). Normal,
+insert, replace, visual and visual-line modes; counts, registers (named,
+numbered, `"-`, `"0`, `"+`/`"*`, `"_`, append with capitals), the
+operators `d c y > < g~ gu gU` over every motion and the text objects
+(`iw aw iW aW is as ip ap i( a( i[ i{ i< i" i' i` it at`), `x X s S D C
+Y p P gp J gJ ~ r R u Ctrl+R .`, `f t ; ,`, `% { } ( ) H M L gg G`,
+marks and the jump list, macros (`q` `@` `@@`, stored as text in the
+register), `Ctrl+A/X` on numbers, `zz zt zb Ctrl+D/U/F/B/E/Y`, search
+with vim's pattern dialect (`\v`, `\<`, `\(`, `\{n,m}`, `\c`) plus `n N *
+#` and `hlsearch`, and a command line: `:w :q :wq :x :qa :e :s :& :g :v
+:normal :d :y :pu :m :t :j :> :< :sort :noh :set :sp :vs :reg :marks
+:jumps :u :red :term`, with `%`, `.`, `$`, marks, `/pat/` and offsets as
+ranges. `Ctrl+W v s h j k l q` work the panes; `ZZ` and `ZQ` too.
+
+Deliberately absent, or not yet:
+
+- **Visual block mode** (`Ctrl+V`). The renderer draws one contiguous
+  selection; a rectangle is a different drawing and a different edit.
+- **`=`** re-indents nothing: there is no formatter to hand lines to.
+- **`:s///c`** (confirm each) — no prompt to ask with. Run it plain and
+  undo.
+- **Regex look-around** (`\@=`) and `\zs`/`\ze`, `~` in patterns.
+- **Search offsets** (`/pat/e`), `:s` with `\=`, `gq`, `K`, folds,
+  `:map` — mappings are the `[keys]` table's job.
+- **The `.` register and `Ctrl+A` in insert mode** hold typed text only;
+  a snippet expanded by Tab is not in them.
+- **Undo is per session**, as everywhere here; `u` past a reopen is gone.
 
 ## Keyboard-only
 
@@ -112,13 +197,22 @@ kubide                               # opens the current directory
 Needs Rust 1.97+, the MSVC toolchain, and Visual Studio Build Tools with
 **Desktop development with C++** — the tree-sitter grammars compile C.
 
-State lives outside the repo:
+On Arch Linux the same commands work with `pacman -S rust base-devel` (a C
+compiler for the grammars; the window, text and clipboard crates are pure
+Rust and dlopen X11/Wayland at run time, so no `-dev` packages). Put a Nerd
+Font first — `ttf-jetbrains-mono-nerd` — or the tree falls back to plain
+markers exactly as on Windows. X11 needs `libxkbcommon-x11` installed, which
+a desktop always has. Whether the window is blurred behind is the
+compositor's call: Hyprland and KWin blur windows with alpha when told to,
+GNOME draws them plain over the wallpaper; the tint is ours either way.
 
-- `%APPDATA%\kubide\config.toml` — settings. Copy `config.example.toml` to
-  start; it documents every option and is checked against the defaults by a
-  test.
-- `%APPDATA%\kubide\sessions\*.session` — one remembered layout per project.
-  Deleting them is harmless.
+State lives outside the repo, in `%APPDATA%\kubide` on Windows and
+`~/.config/kubide` on Linux:
+
+- `config.toml` — settings. Copy `config.example.toml` to start; it
+  documents every option and is checked against the defaults by a test.
+- `sessions\*.session` — one remembered layout per project. Deleting them
+  is harmless.
 
 Before pushing:
 
@@ -127,4 +221,5 @@ cargo clippy --all-targets    # leave no warnings
 cargo test
 cargo run -p kb-term --example dump    # terminal layer
 cargo run -p kb-git --example status   # git layer
+cargo run -p kb-agent --example chat   # one live turn through the claude CLI
 ```

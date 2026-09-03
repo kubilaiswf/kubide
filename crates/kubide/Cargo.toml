@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+kb-agent = { path = "../kb-agent" }
 kb-cfg = { path = "../kb-cfg" }
 kb-edit = { path = "../kb-edit" }
 kb-find = { path = "../kb-find" }
@@ -14,7 +15,6 @@ kb-git = { path = "../kb-git" }
 kb-syn = { path = "../kb-syn" }
 kb-text = { path = "../kb-text" }
 kb-term = { path = "../kb-term" }
+kb-vim = { path = "../kb-vim" }
 kb-ui = { path = "../kb-ui" }
 kb-win = { path = "../kb-win" }
-windows.workspace = true
-windows-numerics.workspace = true

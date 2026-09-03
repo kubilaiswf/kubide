@@ -72,6 +72,10 @@ visual.
 - Rust 1.97+, `x86_64-pc-windows-msvc`
 - Visual Studio Build Tools, **Desktop development with C++**
 - Windows 11 build 22621+
+- Linux (Arch, any X11 or Wayland desktop): Rust 1.97+ and a C compiler.
+  The window is winit, the surface is tiny-skia over shared memory, text
+  is cosmic-text; everything visible is still drawn by `draw.rs`, so a
+  change there lands on both. Check both builds before sending.
 
 Every option lives in [config.example.toml](config.example.toml). Set
 `KUBIDE_CONFIG` to try one without touching your real config. If you add

@@ -4,5 +4,15 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
-[dependencies]
+[target.'cfg(windows)'.dependencies]
 windows.workspace = true
+
+# winit is the window on X11 and Wayland: one event loop, both display
+# servers, and the same drag-to-move and drag-to-resize requests a frameless
+# window needs on each. arboard is the clipboard for the same two. libc is
+# for the local clock, png for `.cur` files that carry PNG frames.
+[target.'cfg(not(windows))'.dependencies]
+winit.workspace = true
+arboard.workspace = true
+libc.workspace = true
+png.workspace = true

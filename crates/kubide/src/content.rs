@@ -19,6 +19,8 @@ pub enum Content {
     Viewer(Viewer),
     Settings(Settings),
     Git(GitPanel),
+    /// Claude Code, in a pane.
+    Agent(crate::agent::AgentPane),
     /// What a bare `kubide` shows when it does not recognise where it is.
     Welcome(Welcome),
 }
@@ -167,6 +169,20 @@ impl Content {
         }
     }
 
+    /// Whether replacing this would kill a process someone is talking to.
+    ///
+    /// A shell, or an agent mid-turn. The guards that refuse to open a
+    /// panel over a terminal ask this rather than matching the variant, so
+    /// the agent pane gets the same protection without each of them
+    /// learning about it separately.
+    pub fn is_live(&self) -> bool {
+        match self {
+            Content::Terminal(_) => true,
+            Content::Agent(a) => a.running(),
+            _ => false,
+        }
+    }
+
     /// Opens a path as the right kind of pane.
     ///
     /// A refusal is still a pane rather than nothing happening: pressing Enter
@@ -217,6 +233,10 @@ pub struct Editor {
     /// The caret position and revision the view last followed. The gate
     /// that keeps caret-following out of wheel scrolling's way.
     caret_seen: Option<(kb_edit::Pos, u64)>,
+    /// The pane's vim state: mode, pending keys, marks. Always present and
+    /// consulted only while vim mode is on, so switching it on mid-session
+    /// finds every pane in normal mode rather than in whatever it was doing.
+    pub vim: kb_vim::Vim,
 }
 
 impl Editor {
@@ -235,6 +255,7 @@ impl Editor {
             marks: Vec::new(),
             marks_at: None,
             caret_seen: None,
+            vim: kb_vim::Vim::new(),
         }
     }
 
@@ -328,6 +349,21 @@ impl Editor {
         let max_top = self.buffer.len().saturating_sub(visible.max(1));
         let next = self.top as i32 - delta;
         self.top = next.clamp(0, max_top as i32) as usize;
+    }
+
+    /// Re-reads the file from disk, throwing away the caches with it.
+    ///
+    /// The buffer's revision starts over at zero, which is where an
+    /// untouched buffer already was — so without forgetting what was
+    /// highlighted at revision zero, a reloaded file would keep the old
+    /// colours over the new text.
+    pub fn reload(&mut self) -> std::io::Result<()> {
+        self.buffer.reload()?;
+        self.highlighted_at = None;
+        self.widest_at = None;
+        self.marks_at = None;
+        self.caret_seen = None;
+        Ok(())
     }
 
     pub fn save(&mut self) {

@@ -366,44 +366,10 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (yoe + era * 400 + i64::from(m <= 2), m, d)
 }
 
-/// The wall clock's distance from UTC right now, in minutes.
-///
-/// Measured by comparing Windows' two clocks rather than by reading time
-/// zone rules: the difference of the two answers *is* the offset, rules,
-/// DST and all, with nothing to get wrong.
+/// The wall clock's distance from UTC right now, in minutes. The platform
+/// layer answers, since the two systems keep their clocks differently.
 fn local_utc_offset_minutes() -> i64 {
-    use windows::Win32::System::SystemInformation::{GetLocalTime, GetSystemTime};
-    let (l, u) = unsafe { (GetLocalTime(), GetSystemTime()) };
-    let minutes = |t: &windows::Win32::Foundation::SYSTEMTIME| {
-        i64::from(t.wDay) * 1440 + i64::from(t.wHour) * 60 + i64::from(t.wMinute)
-    };
-    let mut diff = minutes(&l) - minutes(&u);
-    // The two clocks can sit on either side of both midnight and a month
-    // boundary; anything beyond ±14h can only be a month's worth of days.
-    if diff > 14 * 60 {
-        diff -= tail_of_month(&u);
-    } else if diff < -14 * 60 {
-        diff += tail_of_month(&l);
-    }
-    diff
-}
-
-/// Minutes in the whole month `t` sits in — the wrap distance when the
-/// local and UTC clocks straddle a month boundary.
-fn tail_of_month(t: &windows::Win32::Foundation::SYSTEMTIME) -> i64 {
-    let leap = t.wYear.is_multiple_of(4) && (!t.wYear.is_multiple_of(100) || t.wYear.is_multiple_of(400));
-    let days = match t.wMonth {
-        2 => {
-            if leap {
-                29
-            } else {
-                28
-            }
-        }
-        4 | 6 | 9 | 11 => 30,
-        _ => 31,
-    };
-    i64::from(days) * 1440
+    kb_win::local_utc_offset_minutes()
 }
 
 /// "30 KB", rounded up with a floor of one, exactly as Explorer prints it.
@@ -541,7 +507,7 @@ mod tests {
 
     #[test]
     fn up_from_a_drive_root_stays_put() {
-        let root = PathBuf::from(r"C:\");
+        let root = PathBuf::from(if cfg!(windows) { r"C:\" } else { "/" });
         let mut p = Picker::new(&root, Vec::new(), Vec::new());
         p.up();
         assert_eq!(p.dir, root);

@@ -5,4 +5,21 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+kb-text = { path = "../kb-text" }
+kb-win = { path = "../kb-win" }
+
+[target.'cfg(windows)'.dependencies]
 windows.workspace = true
+windows-numerics.workspace = true
+
+# A CPU rasteriser for the handful of shapes the editor draws, and the two
+# ways of putting the finished frame on screen: softbuffer for X11, and a
+# hand-written wl_shm presenter for Wayland (softbuffer's uses XRGB there,
+# which throws the alpha channel — and with it the whole look — away).
+[target.'cfg(not(windows))'.dependencies]
+tiny-skia.workspace = true
+softbuffer.workspace = true
+wayland-client.workspace = true
+raw-window-handle.workspace = true
+winit.workspace = true
+libc.workspace = true

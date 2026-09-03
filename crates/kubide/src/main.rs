@@ -8,6 +8,7 @@
 
 #![windows_subsystem = "windows"]
 
+mod agent;
 mod content;
 mod draw;
 mod folders;
@@ -19,16 +20,14 @@ mod session;
 use content::{Content, Explorer};
 use metrics::{TextArea, INSET};
 use palette::{Palette, Target};
-use kb_gfx::Renderer;
+use kb_gfx::{Renderer, Result};
 use kb_text::TextEngine;
 use kb_ui::{focus_in_dir, Axis, Dir, DividerRef, Hit, Layout, PaneId, Rect, Tree};
-use kb_win::{Backdrop, Chrome, CursorShape, Handler, Mods, WindowConfig};
+use kb_win::{Backdrop, Chrome, CursorShape, Handler, Mods, Window, WindowConfig};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 use std::path::{Path, PathBuf};
-use windows::core::Result;
-use windows::Win32::Foundation::HWND;
 
 struct Kubide {
     gfx: Option<Renderer>,
@@ -70,7 +69,7 @@ struct Kubide {
     theme_watch: Option<kb_cfg::Watcher>,
     /// Watches the workspace's own `.kubide\config.toml`, when it has one.
     ws_watch: Option<kb_cfg::Watcher>,
-    hwnd: Option<HWND>,
+    window: Option<Window>,
 
     git: kb_git::Git,
     /// Ticks since the last git refresh. `git status` costs real time on a big
@@ -94,6 +93,12 @@ struct Kubide {
     /// Trigger words Tab expands, per file extension. Reloaded with the
     /// config, so editing a snippet file lands on the next config touch.
     snippets: kb_cfg::snippets::Snippets,
+    /// What every editor's vim shares: registers, the last search, the
+    /// last change, the macro being recorded. One per window, because
+    /// yanking in one pane and putting in another is the point of
+    /// registers. Its options come from `[vim]` and `:set` bends them until
+    /// that table next changes.
+    vim: kb_vim::Session,
     /// The overlay, when one is open. It captures every key while it is.
     palette: Option<Palette>,
     /// The folder picker, when it is open. Above the palette in every sense:
@@ -110,6 +115,9 @@ struct Kubide {
     timer: pomodoro::Pomodoro,
     /// The last drawn value of the time-varying status segments.
     status_stamp_last: (u64, u64),
+    /// The last drawn seconds count of busy agent panes, summed — the same
+    /// repaint-on-change gate, for the "working 12s" in their headers.
+    agent_stamp_last: u64,
     /// The status bar's shortcut hints, as drawn: hit box and what pressing
     /// one runs.
     corner_chips: Vec<(Rect, kb_cfg::Action)>,
@@ -203,8 +211,6 @@ impl Glyphs {
 /// overlay instead, as a list that says what each answer does.
 #[derive(Clone, PartialEq, Eq, Debug)]
 enum Confirm {
-    /// Replacing what a pane holds, when that would throw away unsaved work.
-    Replace(PaneId),
     /// Saving over a file that changed on disk after we opened it.
     Overwrite(PaneId),
     /// Removing the selected path. Nothing here goes to a recycle bin.
@@ -282,6 +288,9 @@ enum Pending {
     SwitchUnsaved(PathBuf),
     /// Quitting with unsaved work anywhere.
     QuitUnsaved,
+    /// Opening a file into a pane whose editor has unsaved work, carrying
+    /// what was about to be opened there.
+    ReplaceUnsaved(PaneId, PathBuf),
 }
 
 /// The answers to "what about the unsaved work", in the order they are listed.
@@ -407,12 +416,14 @@ impl Kubide {
             root: workspace.dir.clone(),
             syntax: Rc::new(kb_syn::Syntax::new()),
             snippets: kb_cfg::snippets::load(),
+            vim: kb_vim::Session::new(vim_options(&loaded.config)),
             palette: None,
             folder_picker: None,
             picker_hits: None,
             pending: None,
             timer: pomodoro::Pomodoro::new(loaded.config.pomodoro),
             status_stamp_last: (0, 0),
+            agent_stamp_last: 0,
             corner_chips: Vec::new(),
             settings_btn: None,
             settings_hover: false,
@@ -442,14 +453,18 @@ impl Kubide {
             cfg_watch: watch,
             theme_watch: loaded.theme_path.as_deref().and_then(kb_cfg::Watcher::new),
             ws_watch: loaded.workspace_path.as_deref().and_then(kb_cfg::Watcher::new),
-            hwnd: None,
+            window: None,
         })
     }
 
     fn relayout(&mut self, w: f32, h: f32) {
         let pad = self.cfg.window.padding;
         let cap = self.cfg.window.caption_height;
-        self.area = Rect::new(pad, cap, (w - pad * 2.0).max(1.0), (h - cap - pad).max(1.0));
+        // The status bar is a row of text along the bottom edge, and the
+        // panes stop above it. With only the padding below them, a pane's
+        // last few pixels — its sideways scroll thumb — sat on the clock.
+        let status = (self.text.line_height() + 8.0).max(pad);
+        self.area = Rect::new(pad, cap, (w - pad * 2.0).max(1.0), (h - cap - status).max(1.0));
         self.layout = self.tree.compute(self.area);
     }
 
@@ -487,6 +502,9 @@ impl Kubide {
             return true;
         }
 
+        if refresh.vim {
+            self.vim.options = vim_options(&self.cfg);
+        }
         if refresh.font {
             let _ = self.text.set_fonts(&self.cfg.font.family, self.cfg.font.size);
             // A new family is a new set of codepoints. Keeping the old answer
@@ -504,16 +522,16 @@ impl Kubide {
             // The pointer wears the theme too, and Windows only re-asks for
             // it when the mouse moves; without this poke a recolour leaves
             // the old cursor on screen until the hand twitches.
-            if let Some(hwnd) = self.hwnd {
-                kb_win::refresh_cursor(hwnd);
+            if let Some(window) = self.window {
+                kb_win::refresh_cursor(window);
             }
         }
-        if let Some(hwnd) = self.hwnd {
+        if let Some(window) = self.window {
             if refresh.window {
-                kb_win::set_backdrop(hwnd, backdrop_of(self.cfg.window.backdrop));
+                kb_win::set_backdrop(window, backdrop_of(self.cfg.window.backdrop));
             }
             if refresh.layout {
-                kb_win::set_caption_height(hwnd, self.cfg.window.caption_height as i32);
+                kb_win::set_caption_height(window, self.cfg.window.caption_height as i32);
             }
         }
         if refresh.font || refresh.layout {
@@ -677,6 +695,15 @@ impl Kubide {
                 }
             }
             Some(Content::Editor(e)) => {
+                // In vim mode the selection is visual mode's, and a cut is
+                // its `d`, so the registers see it too.
+                if self.cfg.vim.enabled {
+                    let Some(s) = e.vim.selection_text(&e.buffer) else { return };
+                    if kb_win::clipboard::set_text(&s).is_ok() && cut {
+                        self.vim_key(kb_vim::Key::Char('d'));
+                    }
+                    return;
+                }
                 let Some(s) = e.buffer.selected_text() else { return };
                 // Only remove the text once the clipboard actually took it,
                 // or a failed cut destroys the selection with no copy of it.
@@ -685,6 +712,120 @@ impl Kubide {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// The vim state of the focused pane, when it is an editor and vim mode
+    /// is on. `None` is "not vim's business", which is what every caller
+    /// wants to know.
+    pub(crate) fn focused_vim(&self) -> Option<&kb_vim::Vim> {
+        if !self.cfg.vim.enabled {
+            return None;
+        }
+        match self.content.get(&self.focus) {
+            Some(Content::Editor(e)) => Some(&e.vim),
+            _ => None,
+        }
+    }
+
+    /// Hands a key to the focused editor's vim. `None` when vim mode is off
+    /// or the focus is not an editor; otherwise whether vim took it.
+    fn vim_key(&mut self, key: kb_vim::Key) -> Option<bool> {
+        if !self.cfg.vim.enabled {
+            return None;
+        }
+        let visible = self.visible_rows(self.focus);
+        let auto_close = self.cfg.editor.auto_close;
+        let Some(Content::Editor(e)) = self.content.get_mut(&self.focus) else {
+            return None;
+        };
+        let ctx = kb_vim::Ctx { top: e.top, visible, auto_close };
+        let outcome = e.vim.key(key, &mut e.buffer, &mut self.vim, &mut Clipboard, ctx);
+        match outcome {
+            kb_vim::Outcome::Pass => Some(false),
+            kb_vim::Outcome::Handled(fx) => {
+                // Typing means the user moved on from whatever was being
+                // confirmed, the same as the plain editor path.
+                e.status = None;
+                self.confirm = None;
+                self.notice = None;
+                for f in fx {
+                    self.vim_effect(f);
+                }
+                Some(true)
+            }
+        }
+    }
+
+    /// Does what vim asked for and the buffer could not.
+    fn vim_effect(&mut self, effect: kb_vim::Effect) {
+        use kb_vim::Effect::*;
+        match effect {
+            Save => {
+                self.run(kb_cfg::Action::Save);
+            }
+            SaveAll => {
+                self.save_every_editor();
+            }
+            SaveClose => {
+                self.run(kb_cfg::Action::Save);
+                // Close asks if the save did not take — a read-only file
+                // must not vanish from the screen on `:wq`.
+                self.run(kb_cfg::Action::ClosePane);
+            }
+            ClosePane => {
+                self.run(kb_cfg::Action::ClosePane);
+            }
+            ClosePaneForce => self.close_pane(self.focus),
+            Quit => {
+                self.run(kb_cfg::Action::Quit);
+            }
+            QuitForce => {
+                self.save_session();
+                kb_win::quit();
+            }
+            SplitRight => {
+                self.run(kb_cfg::Action::SplitRight);
+            }
+            SplitDown => {
+                self.run(kb_cfg::Action::SplitDown);
+            }
+            Focus(dir) => {
+                self.move_focus(match dir {
+                    kb_vim::Dir::Left => Dir::Left,
+                    kb_vim::Dir::Right => Dir::Right,
+                    kb_vim::Dir::Up => Dir::Up,
+                    kb_vim::Dir::Down => Dir::Down,
+                });
+            }
+            OpenTerminal => {
+                self.open_terminal();
+            }
+            OpenFile(name) => {
+                // Relative to the workspace, the way `:e src/main.rs` reads
+                // from a shell standing at the project root.
+                let path = self.root.join(name);
+                if !path.is_file() {
+                    self.warn(&format!("not a file: {}", path.display()));
+                    return;
+                }
+                self.open_at(path, kb_edit::Pos::new(0, 0));
+            }
+            ScrollTo(top) => {
+                if let Some(Content::Editor(e)) = self.content.get_mut(&self.focus) {
+                    e.top = top.min(e.buffer.len().saturating_sub(1));
+                }
+            }
+        }
+    }
+
+    /// After a click or a drag: vim's mode follows what the mouse did.
+    fn vim_mouse_sync(&mut self, pane: PaneId) {
+        if !self.cfg.vim.enabled {
+            return;
+        }
+        if let Some(Content::Editor(e)) = self.content.get_mut(&pane) {
+            e.vim.mouse_sync(&mut e.buffer);
         }
     }
 
@@ -706,6 +847,7 @@ impl Kubide {
                 // leave stray carriage returns rendered as garbage.
                 e.buffer.insert(&text.replace("\r\n", "\n").replace('\r', "\n"));
             }
+            Some(Content::Agent(a)) => a.paste(&text),
             _ => {}
         }
     }
@@ -740,16 +882,62 @@ impl Kubide {
         (index < e.tree.rows().len()).then_some(index)
     }
 
-    /// Opens a terminal in the focused pane; does nothing if it's taken.
+    /// The pane holding a shell, if one is on screen.
+    fn terminal_pane(&self) -> Option<PaneId> {
+        self.content
+            .iter()
+            .find(|(_, c)| matches!(c, Content::Terminal(_)))
+            .map(|(p, _)| *p)
+    }
+
+    /// The pane the code lives in: where a strip under the work belongs.
+    ///
+    /// The focused pane when it holds a file or nothing; otherwise the
+    /// first file pane in reading order, then the first pane that is not
+    /// furniture. The tree, the agent and a shell are things beside the
+    /// code, and a strip under one of those is a strip nobody asked for.
+    fn code_pane(&self) -> PaneId {
+        let is_code = |c: Option<&Content>| {
+            matches!(c, None | Some(Content::Editor(_) | Content::Viewer(_) | Content::Welcome(_)))
+        };
+        if is_code(self.content.get(&self.focus)) {
+            return self.focus;
+        }
+        let order = kb_ui::panes_in_reading_order(&self.layout);
+        order
+            .iter()
+            .copied()
+            .find(|p| is_code(self.content.get(p)))
+            .or_else(|| {
+                order.iter().copied().find(|p| {
+                    !matches!(
+                        self.content.get(p),
+                        Some(Content::Explorer(_) | Content::Agent(_) | Content::Terminal(_))
+                    )
+                })
+            })
+            .unwrap_or(self.focus)
+    }
+
+    /// Opens a terminal, or goes to the one that is open.
+    ///
+    /// One shell on screen is the shell they meant, the same as the tree:
+    /// pressing the key from anywhere lands in it rather than growing a
+    /// second one under whatever had focus.
     fn open_terminal(&mut self) -> bool {
-        // An empty pane takes the shell whole. A full one gets a strip
-        // along the bottom of the work instead — the terminal is an
-        // accessory to the code, not a replacement for it. This used to
-        // refuse outright on a full pane, which read as a dead key.
+        if let Some(pane) = self.terminal_pane() {
+            self.focus = pane;
+            return true;
+        }
+        // An empty pane takes the shell whole. Otherwise it is a strip
+        // along the bottom of the code — the terminal is an accessory to
+        // the code, not a replacement for it, and it goes under the code
+        // wherever focus happens to be. This used to refuse outright on a
+        // full pane, which read as a dead key.
         let target = if !self.content.contains_key(&self.focus) {
             self.focus
         } else {
-            let base = self.workspace_pane();
+            let base = self.code_pane();
             if !self.content.contains_key(&base) {
                 base
             } else {
@@ -790,6 +978,76 @@ impl Kubide {
         }
     }
 
+    /// The pane holding the agent, if one is on screen.
+    fn agent_pane(&self) -> Option<PaneId> {
+        self.content
+            .iter()
+            .find(|(_, c)| matches!(c, Content::Agent(_)))
+            .map(|(p, _)| *p)
+    }
+
+    /// Opens the agent pane, or goes to it if one is up.
+    ///
+    /// One per window. A second conversation is a second process with its
+    /// own idea of the working tree, and two of them editing the same
+    /// files is a race nobody asked for. Placement follows the terminal:
+    /// an empty pane takes it whole, a full one gets a column beside the
+    /// work rather than losing the code under it.
+    fn open_agent(&mut self) {
+        if let Some(pane) = self.agent_pane() {
+            self.focus = pane;
+            return;
+        }
+        let target = if !self.content.contains_key(&self.focus) {
+            self.focus
+        } else {
+            let base = self.workspace_pane();
+            if !self.content.contains_key(&base) {
+                base
+            } else {
+                match self.tree.split_at(base, Axis::Horizontal, 0.6) {
+                    Some(p) => {
+                        self.layout = self.tree.compute(self.area);
+                        p
+                    }
+                    None => {
+                        self.warn("no room for another pane");
+                        return;
+                    }
+                }
+            }
+        };
+        let cfg = &self.cfg.agent;
+        let opts = kb_agent::Options {
+            command: cfg.command.clone(),
+            // The workspace, not wherever the exe was launched from: the
+            // CLI reads CLAUDE.md there and scopes its tools to it.
+            cwd: self.root.clone(),
+            model: cfg.model.clone(),
+            permission_mode: cfg.permission_mode.clone(),
+            allowed_tools: cfg.allowed_tools.clone(),
+            resume: None,
+        };
+        self.content
+            .insert(target, Content::Agent(agent::AgentPane::new(opts)));
+        self.focus = target;
+        self.typed_at = Instant::now();
+    }
+
+    /// Re-reads every editor whose file changed on disk and that has no
+    /// unsaved work of its own. One with edits keeps them; saving it asks
+    /// first, which is the standing rule for a file another program
+    /// touched.
+    fn reload_clean_editors(&mut self) {
+        for c in self.content.values_mut() {
+            if let Content::Editor(e) = c {
+                if !e.buffer.modified() && e.buffer.changed_on_disk() && e.reload().is_ok() {
+                    e.status = Some("reloaded \u{b7} changed by the agent".into());
+                }
+            }
+        }
+    }
+
     /// The pane holding the file tree, if one is on screen.
     fn explorer_pane(&self) -> Option<PaneId> {
         self.content
@@ -811,14 +1069,14 @@ impl Kubide {
             self.focus = pane;
             return true;
         }
-        if matches!(self.content.get(&self.focus), Some(Content::Terminal(_))) {
+        if self.content.get(&self.focus).is_some_and(Content::is_live) {
             let key = self
                 .cfg
                 .keys
                 .binding_for(kb_cfg::Action::ToggleExplorer)
                 .map(|c| c.to_string())
                 .unwrap_or_else(|| "the toggle".to_string());
-            self.warn(&format!("a shell is running here — {key} puts the tree beside it"));
+            self.warn(&format!("something is running here — {key} puts the tree beside it"));
             return false;
         }
         let root = self.root.clone();
@@ -843,8 +1101,8 @@ impl Kubide {
             }
             // Said out loud, like the git panel's refusal: a key that quietly
             // does nothing reads as a broken key.
-            Some(Content::Terminal(_)) => {
-                self.warn("settings will not replace a running shell — use another pane");
+            Some(c) if c.is_live() => {
+                self.warn("settings will not replace a running process — use another pane");
                 return false;
             }
             _ if self.unsaved_in(target) => {
@@ -876,7 +1134,7 @@ impl Kubide {
         }
         if let Some(p) = focus_in_dir(&self.layout, self.focus, Dir::Right)
             .or_else(|| focus_in_dir(&self.layout, self.focus, Dir::Down))
-            .filter(|p| !matches!(self.content.get(p), Some(Content::Terminal(_))))
+            .filter(|p| !self.content.get(p).is_some_and(Content::is_live))
         {
             return p;
         }
@@ -905,8 +1163,8 @@ impl Kubide {
                 self.close_git_panel();
                 return;
             }
-            Some(Content::Terminal(_)) => {
-                self.warn("the git panel will not replace a running shell — use another pane");
+            Some(c) if c.is_live() => {
+                self.warn("the git panel will not replace a running process — use another pane");
                 return;
             }
             _ if self.unsaved_in(target) => {
@@ -1187,11 +1445,30 @@ impl Kubide {
         // The same landing rules as the file finder: never over the
         // explorer, never over unsaved work.
         let target = self.workspace_pane();
+        self.open_over(target, path);
+    }
+
+    /// Opens a file into a pane, asking first when that pane holds unsaved
+    /// work.
+    ///
+    /// Every way of opening a file — the tree, the finder, the picker —
+    /// lands here, so they all ask the same question in the same box as
+    /// closing a pane does: Save, Discard, Cancel. A press-again warning
+    /// used to stand here, and it could not offer the answer people
+    /// usually want, which is to save.
+    fn open_over(&mut self, target: PaneId, path: PathBuf) {
         if self.unsaved_in(target) {
-            self.confirm = Some(Confirm::Replace(target));
-            self.warn("unsaved changes there — save first, or close the pane");
+            let name = self.file_name_in(target);
+            self.pending = Some(Pending::ReplaceUnsaved(target, path));
+            self.palette = Some(Palette::ask(
+                "Unsaved Changes",
+                &format!("Replace {name} without saving it?"),
+                &["Save", "Discard", "Cancel"],
+            ));
             return;
         }
+        self.confirm = None;
+        self.notice = None;
         self.content.insert(target, Content::open_path(&path));
         self.focus = target;
     }
@@ -1463,13 +1740,7 @@ impl Kubide {
                 // Never over the explorer, and the same protection as the
                 // tree: opening must not discard work.
                 let target = self.workspace_pane();
-                if self.unsaved_in(target) {
-                    self.confirm = Some(Confirm::Replace(target));
-                    self.warn("unsaved changes there — save first, or close the pane");
-                    return;
-                }
-                self.content.insert(target, Content::open_path(&path));
-                self.focus = target;
+                self.open_over(target, path);
             }
             Target::Text(answer) => self.apply_prompt(answer),
             Target::Answer(index) => self.apply_answer(index),
@@ -1546,8 +1817,8 @@ impl Kubide {
     fn save_session(&self) {
         // Before the welcome check, and outside the per-workspace file: a
         // window someone sized is a window they sized, whatever was in it.
-        if let Some(hwnd) = self.hwnd {
-            if let Some(place) = kb_win::placement(hwnd) {
+        if let Some(window) = self.window {
+            if let Some(place) = kb_win::placement(window) {
                 session::note_window_place(place);
             }
         }
@@ -1672,8 +1943,8 @@ impl Kubide {
         // Never over the explorer: pressed from the tree, the file goes
         // next door, same as every other way of opening one.
         let pane = self.workspace_pane();
-        if self.terminal(pane).is_some() {
-            self.warn("this pane is a terminal — no file to switch back to");
+        if self.content.get(&pane).is_some_and(Content::is_live) {
+            self.warn("something is running in this pane — no file to switch back to");
             return;
         }
         let current: Option<PathBuf> = match self.content.get(&pane) {
@@ -1817,8 +2088,8 @@ impl Kubide {
             }
         }
 
-        if let Some(hwnd) = self.hwnd {
-            kb_win::set_title(hwnd, &title_for(&self.root));
+        if let Some(window) = self.window {
+            kb_win::set_title(window, &title_for(&self.root));
         }
         // Backspace is one key and a directory listing looks much the same on
         // either side of it, so the move has to be said out loud. Losing the
@@ -1843,6 +2114,22 @@ impl Kubide {
     fn apply_answer(&mut self, index: usize) {
         let Some(op) = self.pending.take() else { return };
         match op {
+            Pending::ReplaceUnsaved(pane, path) => {
+                if index == SAVE {
+                    if let Some(Content::Editor(e)) = self.content.get_mut(&pane) {
+                        e.save();
+                        if e.buffer.modified() {
+                            self.warn("still unsaved — nothing was opened over it");
+                            return;
+                        }
+                    }
+                } else if index != DISCARD {
+                    return;
+                }
+                // Saved or given up on; either way the pane is free now.
+                self.content.insert(pane, Content::open_path(&path));
+                self.focus = pane;
+            }
             Pending::CloseUnsaved(pane) => {
                 if index == SAVE {
                     if let Some(Content::Editor(e)) = self.content.get_mut(&pane) {
@@ -1886,7 +2173,7 @@ impl Kubide {
                     return;
                 }
                 self.save_session();
-                unsafe { windows::Win32::UI::WindowsAndMessaging::PostQuitMessage(0) }
+                kb_win::quit();
             }
             // The text prompts answer through `apply_prompt`; putting one
             // back would lose it, so they are dropped here deliberately.
@@ -1981,7 +2268,10 @@ impl Kubide {
             // Answered by picking a row, not by typing. Reaching here would
             // mean a choice was left waiting while a text prompt opened, which
             // cannot happen — but dropping it beats acting on the wrong one.
-            Pending::CloseUnsaved(_) | Pending::QuitUnsaved | Pending::SwitchUnsaved(_) => return,
+            Pending::CloseUnsaved(_)
+            | Pending::QuitUnsaved
+            | Pending::SwitchUnsaved(_)
+            | Pending::ReplaceUnsaved(..) => return,
         };
 
         match result {
@@ -1993,8 +2283,7 @@ impl Kubide {
                 // never over a shell or unsaved work.
                 if let Some(path) = created {
                     let target = self.workspace_pane();
-                    let occupied_by_shell =
-                        matches!(self.content.get(&target), Some(Content::Terminal(_)));
+                    let occupied_by_shell = self.content.get(&target).is_some_and(Content::is_live);
                     if !occupied_by_shell && !self.unsaved_in(target) {
                         self.content.insert(target, Content::open_path(&path));
                         self.focus = target;
@@ -2067,19 +2356,9 @@ impl Kubide {
         // Next door, or a fresh split — never into the tree's own pane,
         // which used to be the fallback when the tree was alone.
         let target = self.workspace_pane();
-
         // Opening a file over unsaved work is the same loss as closing the
         // pane, and it happens far more easily — one Enter in the tree.
-        if self.unsaved_in(target) && self.confirm != Some(Confirm::Replace(target)) {
-            self.confirm = Some(Confirm::Replace(target));
-            self.warn("unsaved changes in that pane — press Enter again to discard");
-            return true;
-        }
-
-        self.confirm = None;
-        self.notice = None;
-        self.content.insert(target, Content::open_path(&path));
-        self.focus = target;
+        self.open_over(target, path);
         true
     }
 
@@ -2291,6 +2570,97 @@ impl Kubide {
     /// Deferred actions, the same shape as the explorer: acting needs
     /// `&mut self` again — git, the palette, the pane map — which cannot
     /// happen while the panel is still borrowed out of the map.
+    /// Keys the agent pane owns: the box at the bottom and the transcript
+    /// above it.
+    fn agent_key(&mut self, vk: u8, mods: Mods) -> bool {
+        let visible = self
+            .layout
+            .rect_of(self.focus)
+            .map(|r| agent::visible_rows(r.h, self.text.line_height()))
+            .unwrap_or(1);
+        let said = {
+            let Some(Content::Agent(a)) = self.content.get_mut(&self.focus) else {
+                return false;
+            };
+            // A question up in the pane takes the keys a question takes —
+            // and only from this pane. Focus elsewhere cannot answer it,
+            // which is the point: the person looking at it decides. The
+            // transcript still scrolls, so what is being asked about can
+            // be read.
+            if a.needs_answer() {
+                match vk {
+                    0x0D => a.ask_answer(),
+                    0x1B => a.ask_deny(),
+                    0x25 => a.ask_move(-1),
+                    0x27 => a.ask_move(1),
+                    0x26 => a.scroll(3, visible),
+                    0x28 => a.scroll(-3, visible),
+                    0x21 => a.scroll(visible as i32, visible),
+                    0x22 => a.scroll(-(visible as i32), visible),
+                    _ => return false,
+                }
+                self.typed_at = Instant::now();
+                return true;
+            }
+            // The completion list, while `/` is being typed: up and down
+            // walk it, Tab or Right take the pick, Enter takes it too and
+            // sends on the next press. Everything else types on.
+            if !a.completions().is_empty() {
+                match vk {
+                    0x26 => {
+                        a.complete_move(-1);
+                        return true;
+                    }
+                    0x28 => {
+                        a.complete_move(1);
+                        return true;
+                    }
+                    0x09 | 0x27 => {
+                        a.complete();
+                        return true;
+                    }
+                    _ => {}
+                }
+            }
+            match vk {
+                0x0D => {
+                    a.send();
+                    None
+                }
+                0x1B => {
+                    a.cancel();
+                    None
+                }
+                0x08 => {
+                    a.backspace(mods.ctrl);
+                    None
+                }
+                0x26 => {
+                    a.scroll(3, visible);
+                    None
+                }
+                0x28 => {
+                    a.scroll(-3, visible);
+                    None
+                }
+                0x21 => {
+                    a.scroll(visible as i32, visible);
+                    None
+                }
+                0x22 => {
+                    a.scroll(-(visible as i32), visible);
+                    None
+                }
+                _ => return false,
+            }
+        };
+        self.typed_at = Instant::now();
+        if let Some(said) = said {
+            self.warn(said);
+        }
+        true
+    }
+
     fn git_key(&mut self, vk: u8, mods: Mods) -> bool {
         use content::GitView;
 
@@ -2579,8 +2949,8 @@ impl Kubide {
 }
 
 impl Handler for Kubide {
-    fn on_create(&mut self, hwnd: HWND) {
-        self.hwnd = Some(hwnd);
+    fn on_create(&mut self, window: Window) {
+        self.window = Some(window);
     }
 
     /// The close button, Alt+F4 and the taskbar all come through here, which is
@@ -2593,12 +2963,12 @@ impl Handler for Kubide {
         closing
     }
 
-    fn on_paint(&mut self, hwnd: HWND, chrome: &Chrome) {
-        let _ = self.render(hwnd, chrome);
+    fn on_paint(&mut self, window: Window, chrome: &Chrome) {
+        let _ = self.render(window, chrome);
     }
 
     fn on_resize(&mut self, width: u32, height: u32) {
-        if let Some(gfx) = &self.gfx {
+        if let Some(gfx) = &mut self.gfx {
             let _ = gfx.resize(width, height);
         }
         self.relayout(width as f32, height as f32);
@@ -2640,9 +3010,27 @@ impl Handler for Kubide {
                 t.write(c.encode_utf8(&mut buf).as_bytes());
                 true
             }
-            Some(Content::Editor(e)) => {
-                // Control characters reach here for chords we didn't bind.
-                // Inserting them would put invisible garbage in the file.
+            Some(Content::Editor(_)) => {
+                // Ctrl+[ arrives as the escape character, and to a vim user
+                // it is Esc; every other control character is a chord that
+                // was not bound, and typing it would put garbage in the file.
+                if self.cfg.vim.enabled {
+                    let key = match c {
+                        '\u{1b}' => Some(kb_vim::Key::Esc),
+                        '\r' => Some(kb_vim::Key::Enter),
+                        '\t' => Some(kb_vim::Key::Tab),
+                        c if (c as u32) < 0x20 => None,
+                        c => Some(kb_vim::Key::Char(c)),
+                    };
+                    match key.and_then(|k| self.vim_key(k)) {
+                        Some(true) => return true,
+                        Some(false) => {}
+                        None => return false,
+                    }
+                }
+                let Some(Content::Editor(e)) = self.content.get_mut(&self.focus) else {
+                    return false;
+                };
                 if (c as u32) < 0x20 && c != '\r' && c != '\t' {
                     return false;
                 }
@@ -2686,6 +3074,17 @@ impl Handler for Kubide {
                 }
                 true
             }
+            Some(Content::Agent(a)) => {
+                // Enter, Escape and Backspace arrive as keys and are handled
+                // there; their control characters are not text. A question
+                // has no text box, so typing at it goes nowhere.
+                if (c as u32) < 0x20 || a.needs_answer() {
+                    return false;
+                }
+                a.push(c);
+                self.typed_at = Instant::now();
+                true
+            }
             _ => false,
         }
     }
@@ -2708,8 +3107,17 @@ impl Handler for Kubide {
             _ => self.focus,
         };
         let visible = self.visible_rows(target);
+        let agent_visible = self
+            .layout
+            .rect_of(target)
+            .map(|r| agent::visible_rows(r.h, self.text.line_height()))
+            .unwrap_or(1);
         let keys = self.cfg.keys.clone();
         match self.content.get_mut(&target) {
+            Some(Content::Agent(a)) => {
+                a.scroll(lines, agent_visible);
+                true
+            }
             Some(Content::Terminal(t)) => {
                 // On the alternate screen (vim, btop) there is no scrollback,
                 // so arrow keys are the correct translation.
@@ -2822,6 +3230,39 @@ impl Handler for Kubide {
             false
         };
 
+        // The agent's stream lands on its own schedule too. A tool that
+        // wrote a file moved the working tree under the open editors: the
+        // clean ones re-read, and the tree colours and gutters follow.
+        let mut agent_changed = false;
+        let mut edited = false;
+        let mut busy_secs = 0;
+        for c in self.content.values_mut() {
+            if let Content::Agent(a) = c {
+                let polled = a.poll();
+                agent_changed |= polled.changed;
+                edited |= polled.edited;
+                // Streamed text is let out a few characters a frame; the
+                // frame that moves it is owed a repaint.
+                agent_changed |= a.animate();
+                busy_secs += a.busy_secs().unwrap_or(0);
+            }
+        }
+        // The running count in a busy pane's header moves once a second;
+        // a repaint then and not sixty times a second in between.
+        if busy_secs != self.agent_stamp_last {
+            self.agent_stamp_last = busy_secs;
+            agent_changed = true;
+        }
+        if edited {
+            self.reload_clean_editors();
+            self.git.refresh();
+            for c in self.content.values_mut() {
+                if let Content::Explorer(e) = c {
+                    tree_changed |= e.tree.refresh();
+                }
+            }
+        }
+
         // Redraw for the clock and the countdown only when the text they
         // produce would actually differ. Treating "enabled" as "changed"
         // repaints sixty times a second for a display that moves once — which
@@ -2841,11 +3282,12 @@ impl Handler for Kubide {
         // The caret in an open overlay, on the flip only — a blink is two
         // repaints a second, not sixty.
         let blink = self.caret_on();
-        let blinked = (self.folder_picker.is_some() || self.palette.is_some())
+        let agent_focused = matches!(self.content.get(&self.focus), Some(Content::Agent(_)));
+        let blinked = (self.folder_picker.is_some() || self.palette.is_some() || agent_focused)
             && blink != self.blink_last;
         self.blink_last = blink;
 
-        dirty || git_changed || ticking || remote_done || tree_changed || blinked
+        dirty || git_changed || ticking || remote_done || tree_changed || blinked || agent_changed
     }
 
     fn on_mouse_move(&mut self, x: f32, y: f32) -> bool {
@@ -2976,6 +3418,10 @@ impl Handler for Kubide {
                         }
                         e.status = None;
                     }
+                    // Now, not on release: a click alone must land in
+                    // normal mode at once. The drag that may follow is
+                    // synced when the button comes up.
+                    self.vim_mouse_sync(p);
                     self.last_click = Some((p, pos, std::time::Instant::now()));
                     self.sel_drag = Some(p);
                     return true;
@@ -3016,7 +3462,11 @@ impl Handler for Kubide {
             return true;
         }
         // The selection survives the release — it's about to be copied.
-        self.sel_drag = None;
+        // In vim mode it becomes a visual selection, which is the same
+        // thing spelled vim's way.
+        if let Some(pane) = self.sel_drag.take() {
+            self.vim_mouse_sync(pane);
+        }
         self.dragging.take().is_some()
     }
 
@@ -3071,7 +3521,7 @@ impl Handler for Kubide {
             .is_some_and(|(p, _)| {
                 matches!(
                     self.content.get(p),
-                    Some(Content::Editor(_) | Content::Terminal(_))
+                    Some(Content::Editor(_) | Content::Terminal(_) | Content::Agent(_))
                 )
             });
         self.pointer(over_text)
@@ -3086,6 +3536,19 @@ impl Handler for Kubide {
         }
         if self.palette.is_some() {
             return self.palette_key(vk);
+        }
+        // Vim's own Ctrl chords come before the bindings when the config
+        // says so: a vim user pressing Ctrl+R wants redo, not whatever the
+        // table put there, and Ctrl+D in normal mode is half a page. Only
+        // the chords vim would act on in its current mode; the rest fall
+        // through to the table as usual.
+        if self.cfg.vim.ctrl_keys && mods.ctrl && !mods.shift && !mods.alt && vk.is_ascii_uppercase() {
+            let c = (vk as char).to_ascii_lowercase();
+            if self.focused_vim().is_some_and(|v| v.wants_ctrl(c)) {
+                if let Some(true) = self.vim_key(kb_vim::Key::Ctrl(c)) {
+                    return true;
+                }
+            }
         }
         // Bound actions win over pane content. That ordering is the whole
         // reason shortcuts kept breaking before: a terminal that swallows every
@@ -3122,8 +3585,19 @@ impl Handler for Kubide {
         if self.git_key(vk, mods) {
             return true;
         }
+        if self.agent_key(vk, mods) {
+            return true;
+        }
         if self.explorer_key(vk) {
             return true;
+        }
+        // The named keys go to vim first — Esc is how insert mode ends —
+        // and what it declines (arrows in insert mode, Tab for a snippet)
+        // takes the ordinary path below.
+        if let Some(key) = vim_named_key(vk, mods) {
+            if let Some(true) = self.vim_key(key) {
+                return true;
+            }
         }
         if self.editor_key(vk, mods) {
             return true;
@@ -3201,6 +3675,7 @@ impl Kubide {
                 self.open_settings();
             }
             GitPanel => self.toggle_git_panel(),
+            OpenAgent => self.open_agent(),
             WorkspaceHere => {
                 let Some(path) = self.explorer_selection() else { return true };
                 // A file means its folder: "make the project this thing's
@@ -3228,6 +3703,14 @@ impl Kubide {
                 ));
             }
             ToggleHelp => self.help_open = !self.help_open,
+            ToggleVim => {
+                // Live, like a settings-screen change: the config file is
+                // the separate step, from the screen or by hand.
+                let mut next = self.cfg.clone();
+                next.vim.enabled = !next.vim.enabled;
+                self.apply_config(next);
+                self.warn(if self.cfg.vim.enabled { "vim mode on" } else { "vim mode off" });
+            }
             NewFile | NewFolder => {
                 let Some(dir) = self.explorer_target_dir() else { return true };
                 self.pending = Some(if action == NewFile {
@@ -3372,13 +3855,13 @@ impl Kubide {
                 self.resize_pane(false, Axis::Vertical);
             }
             MinimizeWindow => {
-                if let Some(hwnd) = self.hwnd {
-                    kb_win::minimize(hwnd);
+                if let Some(window) = self.window {
+                    kb_win::minimize(window);
                 }
             }
             ToggleMaximize => {
-                if let Some(hwnd) = self.hwnd {
-                    kb_win::toggle_maximize(hwnd);
+                if let Some(window) = self.window {
+                    kb_win::toggle_maximize(window);
                 }
             }
             Copy => self.copy_from_focus(false),
@@ -3433,7 +3916,7 @@ impl Kubide {
                     return true;
                 }
                 self.save_session();
-                unsafe { windows::Win32::UI::WindowsAndMessaging::PostQuitMessage(0) }
+                kb_win::quit();
             }
         }
         true
@@ -3465,6 +3948,55 @@ impl Kubide {
             _ => return None,
         })
     }
+}
+
+/// The clipboard as vim's `"+` register sees it.
+struct Clipboard;
+
+impl kb_vim::Host for Clipboard {
+    fn clipboard(&mut self) -> Option<String> {
+        kb_win::clipboard::get_text()
+    }
+    fn set_clipboard(&mut self, text: &str) {
+        let _ = kb_win::clipboard::set_text(text);
+    }
+}
+
+/// Vim's options as the config spells them.
+fn vim_options(cfg: &kb_cfg::Config) -> kb_vim::Options {
+    kb_vim::Options {
+        ignorecase: cfg.vim.ignorecase,
+        smartcase: cfg.vim.smartcase,
+        hlsearch: cfg.vim.hlsearch,
+        clipboard: cfg.vim.clipboard,
+    }
+}
+
+/// The keys that reach vim through `on_key` rather than `on_char`: the ones
+/// with no character, and Ctrl+letter, which the layout cannot move.
+/// Letters and digits come through `on_char` with the layout applied, so a
+/// Turkish `ş` types as itself.
+fn vim_named_key(vk: u8, mods: Mods) -> Option<kb_vim::Key> {
+    use kb_vim::Key::*;
+    if mods.ctrl && vk.is_ascii_uppercase() && !mods.shift {
+        return Some(Ctrl((vk as char).to_ascii_lowercase()));
+    }
+    Some(match vk {
+        0x1B => Esc,
+        0x0D => Enter,
+        0x08 => Backspace,
+        0x2E => Delete,
+        0x09 => Tab,
+        0x25 => Left,
+        0x26 => Up,
+        0x27 => Right,
+        0x28 => Down,
+        0x24 => Home,
+        0x23 => End,
+        0x21 => PageUp,
+        0x22 => PageDown,
+        _ => return None,
+    })
 }
 
 /// Moves the settings selection. A free function so the borrow of the pane
@@ -3554,5 +4086,5 @@ fn main() -> Result<()> {
         place: session::window_place(),
         ..Default::default()
     };
-    kb_win::run(window, Box::new(app))
+    Ok(kb_win::run(window, Box::new(app))?)
 }
