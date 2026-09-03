@@ -1,0 +1,12 @@
+[package]
+name = "kb-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+# The agent is the Claude Code CLI itself; this crate only speaks its
+# newline-delimited JSON over a pipe. No HTTP client, no tool loop, no
+# permission system — the CLI owns all of that, and a second copy of any of
+# it here would be a worse Claude Code.
+[dependencies]
+serde_json = "1"

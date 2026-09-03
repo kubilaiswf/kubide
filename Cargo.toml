@@ -13,6 +13,7 @@ members = [
     "crates/kb-git",
     "crates/kb-syn",
     "crates/kb-vim",
+    "crates/kb-agent",
     "crates/kubide",
 ]
 
