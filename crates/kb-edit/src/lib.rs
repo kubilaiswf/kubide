@@ -66,6 +66,9 @@ enum Kind {
     Insert,
     Delete,
     Other,
+    /// Every edit made while a caller holds the group open. One kind for all
+    /// of them is what makes the grouping rule below keep them together.
+    Held,
 }
 
 pub struct Buffer {
@@ -87,6 +90,10 @@ pub struct Buffer {
     redo: Vec<Vec<Edit>>,
     /// The group currently being appended to.
     open_group: Option<Kind>,
+    /// Whether a caller has asked for every edit to land in one group until
+    /// it says otherwise. A vim insert session is one undo step however many
+    /// Enters it contains, and the kind-based grouping above cannot know that.
+    holding: bool,
     /// Undo depth at the last save, for an honest modified flag. A counter, not
     /// a bool, so undoing back to the saved state clears the flag.
     saved_at: usize,
@@ -132,6 +139,7 @@ impl Buffer {
             undo: Vec::new(),
             redo: Vec::new(),
             open_group: None,
+            holding: false,
             saved_at: 0,
             revision: 0,
             disk_stamp: None,
@@ -287,6 +295,7 @@ impl Buffer {
     /// Replaces a range with text. Every edit goes through here, so undo only
     /// has one shape to record.
     fn replace(&mut self, start: Pos, end: Pos, text: &str, kind: Kind) {
+        let kind = if self.holding { Kind::Held } else { kind };
         let removed = self.text_between(start, end);
         let cursor_before = self.cursor;
 
@@ -345,7 +354,61 @@ impl Buffer {
     /// Called when the cursor moves or the buffer is saved: an edit here and
     /// another one somewhere else are not one action, however close in time.
     pub fn break_undo_group(&mut self) {
+        // Ignored while a group is held open: the holder decides when it
+        // ends, and the cursor moves an insert session makes along the way
+        // must not split it.
+        if self.holding {
+            return;
+        }
         self.open_group = None;
+    }
+
+    /// Makes every edit from here to [`Self::end_undo_group`] one undo step,
+    /// whatever kind it is and however the cursor moves in between.
+    ///
+    /// Starts a fresh group rather than joining the open one: the caller is
+    /// naming a unit of work, and a keystroke typed before the call is not
+    /// part of it.
+    pub fn begin_undo_group(&mut self) {
+        self.open_group = None;
+        self.holding = true;
+    }
+
+    pub fn end_undo_group(&mut self) {
+        self.holding = false;
+        self.open_group = None;
+    }
+
+    /// Replaces a range as its own undo step, or as part of the held group
+    /// when one is open. The general edit every caller outside this crate
+    /// that thinks in ranges rather than keystrokes needs.
+    pub fn edit(&mut self, start: Pos, end: Pos, text: &str) {
+        let start = self.clamp(start);
+        let end = self.clamp(end);
+        let (start, end) = if start <= end { (start, end) } else { (end, start) };
+        self.break_undo_group();
+        self.replace(start, end, text, Kind::Other);
+        self.break_undo_group();
+    }
+
+    /// The text between two positions, in document order.
+    pub fn text_in(&self, start: Pos, end: Pos) -> String {
+        let start = self.clamp(start);
+        let end = self.clamp(end);
+        let (start, end) = if start <= end { (start, end) } else { (end, start) };
+        self.text_between(start, end)
+    }
+
+    /// Characters in a line. Zero for a line that does not exist.
+    pub fn line_len(&self, i: usize) -> usize {
+        self.line_chars(i)
+    }
+
+    /// Moves the caret with no selection and no undo consequences beyond the
+    /// group break every movement makes. Clamped, so a caller can aim past
+    /// the end of a line and land on it.
+    pub fn set_cursor(&mut self, to: Pos) {
+        self.move_to(to, false);
     }
 
     pub fn insert(&mut self, text: &str) {
@@ -1875,6 +1938,40 @@ c");
         // And plain text is not a bracket at all.
         b.move_to(Pos::new(0, 1), false);
         assert_eq!(b.matching_bracket(), None);
+    }
+
+    #[test]
+    fn a_held_group_undoes_as_one_step_whatever_happens_inside() {
+        // A vim insert session: typing, an Enter, a cursor move, more
+        // typing. Without the hold those are four undo steps; vim's `u`
+        // takes the whole session back.
+        let mut b = buf("x");
+        b.begin_undo_group();
+        b.insert("ab");
+        b.insert_newline();
+        b.move_line_start(false);
+        b.insert("c");
+        b.end_undo_group();
+        assert_eq!(b.to_text(), "ab\ncx");
+        assert!(b.undo());
+        assert_eq!(b.to_text(), "x", "one undo, the whole session");
+        // And the next edit is its own step again.
+        b.insert("y");
+        b.insert("z");
+        b.move_line_end(false);
+        b.insert("!");
+        b.undo();
+        assert_eq!(b.to_text(), "yzx");
+    }
+
+    #[test]
+    fn edit_and_text_in_take_either_order_of_ends() {
+        let mut b = buf("hello world");
+        assert_eq!(b.text_in(Pos::new(0, 6), Pos::new(0, 11)), "world");
+        assert_eq!(b.text_in(Pos::new(0, 11), Pos::new(0, 6)), "world");
+        b.edit(Pos::new(0, 5), Pos::new(0, 0), "bye");
+        assert_eq!(b.to_text(), "bye world");
+        assert_eq!(b.cursor, Pos::new(0, 3));
     }
 
     #[test]
