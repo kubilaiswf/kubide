@@ -1,0 +1,17 @@
+[package]
+name = "kb-vim"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+# Modal editing over kb-edit's buffer, and nothing else. Vim is a grammar —
+# counts, operators, motions, text objects, registers — and a grammar is the
+# kind of thing that goes wrong in ways only a test catches: `dw` at the end
+# of a line, `cw` on the last word, `.` after `3ihi<Esc>`. Everything here runs
+# without a window, so every one of those has a test.
+#
+# The regular-expression engine is written here rather than pulled in: the
+# `regex` crate is a fine piece of work and a megabyte of it, and it does not
+# speak vim's dialect (`\<`, `\v`, `\{n,m}`) anyway.
+[dependencies]
+kb-edit = { path = "../kb-edit" }

@@ -12,6 +12,7 @@ members = [
     "crates/kb-fs",
     "crates/kb-git",
     "crates/kb-syn",
+    "crates/kb-vim",
     "crates/kubide",
 ]
 
