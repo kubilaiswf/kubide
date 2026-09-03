@@ -93,6 +93,11 @@ pub enum Action {
     GoToLine,
     /// The git panel: stage, commit, read diffs and the log.
     GitPanel,
+    /// The agent pane: Claude Code in a pane, or focus to it if it is up.
+    OpenAgent,
+    /// Vim mode on or off, for this run. The settings screen and the config
+    /// file are where it is made to stick.
+    ToggleVim,
     /// Prompt for a directory and make it the workspace.
     OpenFolder,
     /// Make the explorer's selection the workspace — the tree's own `cd`.
@@ -179,6 +184,8 @@ impl Action {
         Action::FindInProject,
         Action::GoToLine,
         Action::GitPanel,
+        Action::OpenAgent,
+        Action::ToggleVim,
         Action::OpenFolder,
         Action::WorkspaceHere,
         Action::ToggleComment,
@@ -247,6 +254,8 @@ impl Action {
             FindInProject => "Find in project",
             GoToLine => "Go to line",
             GitPanel => "Git: status and commit",
+            OpenAgent => "Claude: agent pane",
+            ToggleVim => "Vim mode on or off",
             OpenFolder => "Open folder",
             WorkspaceHere => "Open selected folder as workspace",
             ToggleComment => "Toggle comment",
@@ -569,6 +578,9 @@ impl Default for Keymap {
             ("ctrl+3", SplitDown),
             ("ctrl+w", ClosePane),
             ("ctrl+t", OpenTerminal),
+            // Both: the shifted pair is what the terminal emulators teach,
+            // and fingers that learned it there press it here too.
+            ("ctrl+shift+t", OpenTerminal),
             ("ctrl+e", OpenExplorer),
             ("ctrl+b", ToggleExplorer),
             // F1 is the reminder in the corner, which is what people press F1
@@ -647,6 +659,9 @@ impl Default for Keymap {
             ("ctrl+g", GoToLine),
             // The shifted pair of go-to-line, and the letter is the point.
             ("ctrl+shift+g", GitPanel),
+            // The shifted pair of select-all, which is free in every shell
+            // and on every layout; the letter is for "agent".
+            ("ctrl+shift+a", OpenAgent),
             // Ctrl+/ is the one everyone knows, and on a Turkish Q layout it
             // is unreachable: VK_OEM_2 is `ö` there, and the slash itself
             // lives on Shift+7. Ctrl+7 is the same key on every layout, and

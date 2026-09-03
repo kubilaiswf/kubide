@@ -122,6 +122,56 @@ auto_close = true
 # on first run — add your own lines there, $0 marks where the caret lands.
 snippets = true
 
+# Vim mode. Off by default; F1 → "Vim mode on or off" flips it for this run,
+# the settings screen or this file makes it stick. A pane starts in normal
+# mode: hjkl, w b e, f t ; ,, counts, the operators d c y > < g~ gu gU with
+# every motion and the text objects (iw aw ip ap i( i[ i{ i< i" i' i` it and
+# their a-forms), x s r R J ~ p P u Ctrl+R, `.`, registers ("a-"z, "0-"9,
+# "+ and "* for the clipboard, "_), marks, Ctrl+O/Ctrl+I, v and V (no
+# block mode), macros (q @), / ? n N * # with vim's own pattern dialect
+# (\v \< \( \{n,m}), and a command line: :w :q :wq :x :e :s :g :v :normal
+# :d :y :m :t :j :sort :set :noh :sp :vs :reg :marks. Ctrl+W v/s/hjkl/q
+# work the panes. The [keys] table stays on top of all of it in insert
+# mode; see ctrl_keys for the other modes. Ctrl+Shift+C/V still copy and
+# paste, and the mouse still selects — a drag becomes a visual selection.
+[vim]
+enabled = false
+# In normal and visual mode vim's own Ctrl chords — Ctrl+R redo, Ctrl+D and
+# Ctrl+U half pages, Ctrl+F/B, Ctrl+E/Y, Ctrl+A/X on numbers, Ctrl+O/I,
+# Ctrl+W window commands — win over the [keys] table; in insert mode
+# Ctrl+W, Ctrl+U, Ctrl+O, Ctrl+R, Ctrl+T/D do. Off, the table always wins
+# and vim only gets the chords it leaves unbound.
+ctrl_keys = true
+# `y` and `p` go through the system clipboard (vim's clipboard=unnamedplus).
+# Off, registers are vim's own and "+ or "* reach the clipboard on purpose.
+clipboard = false
+# Vim's ignorecase and smartcase. `:set ic` and friends change them for the
+# session; this is where they start. Vim's defaults, not the editor's
+# find box, which is always smart-case.
+ignorecase = false
+smartcase = false
+# Keep the last search's matches lit until :noh. Neovim's default rather
+# than vim's, because the highlight is the only way to see what n will do.
+hlsearch = true
+
+# The agent pane: Claude Code, driven inside a pane. It is the `claude` CLI
+# itself — install and log in to that first — so CLAUDE.md, skills, MCP
+# servers and hooks all apply exactly as they do in the terminal.
+[agent]
+command = "claude"
+# Leave unset for the CLI's own default.
+# model = "claude-opus-5"
+# What the CLI asks about comes up as a question in the pane — Allow,
+# Always allow, Deny — the same box the editor uses for unsaved work.
+# The CLI's own vocabulary: default asks about edits and commands,
+# acceptEdits only about commands, plan reads without touching anything.
+# Switch mid-session by typing /mode plan into the pane.
+permission_mode = "default"
+# What never needs asking. Patterns are the CLI's, e.g.
+# ["Bash(cargo test *)", "Bash(git diff *)"]. "Always allow" in the box
+# saves the CLI's own rule to the project's .claude/settings.local.json.
+allowed_tools = []
+
 # The work timer. It counts down in the status bar and stops; it does not pop
 # up, make noise, or take focus. An editor that interrupts you is the opposite
 # of what this is for.
@@ -188,7 +238,7 @@ auto_advance = false
 # cut, save, undo, redo, select-all, select-line, go-to-bracket, commands, go-to-file, find, go-to-line,
 # find-in-project, toggle-comment, move-line-up, move-line-down, duplicate-line, delete-line, font-larger,
 # pomodoro-toggle, pomodoro-reset, pomodoro-skip, font-larger, font-smaller,
-# quit.
+# toggle-vim, quit.
 #
 # Note on layouts: letters and digits have the same virtual-key code on every
 # keyboard layout, the OEM keys do not. That's why split is bound to Ctrl+2/3

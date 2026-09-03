@@ -42,8 +42,42 @@ pub struct Config {
     pub help: Help,
     pub editor: Editing,
     pub cursor: Cursor,
+    pub vim: Vim,
+    pub agent: Agent,
     /// Chord to action. Merges over the defaults rather than replacing them.
     pub keys: Keymap,
+}
+
+/// The agent pane: how Claude Code is started.
+///
+/// Passed through to the CLI rather than interpreted. Its permission modes
+/// and tool patterns are its own vocabulary, documented on its side, and a
+/// translation layer here would only lag behind it.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Agent {
+    /// The executable: `claude` on PATH, or a full path to it.
+    pub command: String,
+    /// `None` leaves the CLI's own default.
+    pub model: Option<String>,
+    /// `default`, `acceptEdits`, `plan`, `bypassPermissions`, …
+    pub permission_mode: String,
+    /// `--allowedTools` patterns: what never needs asking. Everything
+    /// else the CLI would ask about comes up as a question in the pane.
+    pub allowed_tools: Vec<String>,
+}
+
+impl Default for Agent {
+    fn default() -> Self {
+        Self {
+            command: "claude".into(),
+            model: None,
+            // The CLI's own default: edits and commands are asked about,
+            // in the same box the editor asks about unsaved work.
+            permission_mode: "default".into(),
+            allowed_tools: Vec::new(),
+        }
+    }
 }
 
 /// The mouse pointer, drawn by kubide rather than borrowed from Windows.
@@ -146,6 +180,35 @@ pub struct Editing {
 impl Default for Editing {
     fn default() -> Self {
         Self { auto_close: true, snippets: true }
+    }
+}
+
+/// Modal editing. Off by default: vim is a language, and nobody should find
+/// themselves speaking it because they opened a file.
+///
+/// The four search and clipboard options mirror vim's own `ignorecase`,
+/// `smartcase`, `hlsearch` and `clipboard=unnamedplus`, and `:set` changes
+/// them for the session; this table is where they start.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Vim {
+    pub enabled: bool,
+    /// Whether vim's Ctrl chords (Ctrl+R redo, Ctrl+D half a page, Ctrl+W
+    /// window commands, …) beat the `[keys]` table while an editor is in a
+    /// vim mode. Off, the table always wins and vim only gets the chords it
+    /// leaves unbound.
+    pub ctrl_keys: bool,
+    /// The unnamed register is the system clipboard, so `y` copies and `p`
+    /// pastes what other programs see. Vim's `clipboard=unnamedplus`.
+    pub clipboard: bool,
+    pub ignorecase: bool,
+    pub smartcase: bool,
+    pub hlsearch: bool,
+}
+
+impl Default for Vim {
+    fn default() -> Self {
+        Self { enabled: false, ctrl_keys: true, clipboard: false, ignorecase: false, smartcase: false, hlsearch: true }
     }
 }
 
@@ -359,7 +422,26 @@ pub struct Loaded {
     pub problem: Option<String>,
 }
 
-/// `%APPDATA%\kubide\config.toml`, or `$KUBIDE_CONFIG` if set.
+/// Where kubide keeps what is its own: `%APPDATA%\kubide` on Windows,
+/// `$XDG_CONFIG_HOME/kubide` (so `~/.config/kubide`) on Linux.
+///
+/// One folder for the config, the themes, the snippets and the sessions,
+/// found the way the desktop says to find it — Explorer's AppData on one,
+/// the XDG base directories on the other — so nothing is left where a
+/// dotfile manager or a backup would not look.
+pub fn data_dir() -> PathBuf {
+    let base = if cfg!(windows) {
+        std::env::var_os("APPDATA").map(PathBuf::from)
+    } else {
+        std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+    };
+    base.unwrap_or_else(|| PathBuf::from(".")).join("kubide")
+}
+
+/// `config.toml` in [`data_dir`], or `$KUBIDE_CONFIG` if set.
 ///
 /// The override exists for testing and for portable installs; without it the
 /// only way to try a config is to overwrite your real one.
@@ -367,10 +449,7 @@ pub fn config_path() -> PathBuf {
     if let Some(p) = std::env::var_os("KUBIDE_CONFIG") {
         return PathBuf::from(p);
     }
-    let base = std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    base.join("kubide").join("config.toml")
+    data_dir().join("config.toml")
 }
 
 pub fn load() -> Loaded {
@@ -501,7 +580,14 @@ pub fn load_workspace(root: &Path) -> Loaded {
     }
     let mut workspace_path = None;
     match read_table(&ws_path) {
-        Ok(Some(t)) => {
+        Ok(Some(mut t)) => {
+            // The agent section is the user's alone. A project's `.kubide`
+            // travels with the clone, and a clone that could hand itself
+            // `bypassPermissions` or a Bash allowlist would be a project
+            // that runs whatever it likes on first open.
+            if t.remove("agent").is_some() {
+                note(Some(".kubide: [agent] is ignored here — agent settings come from your own config".into()));
+            }
             merge(&mut table, t);
             workspace_path = Some(ws_path);
         }
@@ -754,11 +840,15 @@ pub struct Refresh {
     /// Bindings changed. Nothing to rebuild — the next key press reads the new
     /// map — but it's listed so a keymap edit still counts as a change.
     pub keys: bool,
+    /// The `[vim]` table changed: the shared vim session re-reads its options
+    /// from it. Only then, so a `:set` typed mid-session survives an unrelated
+    /// config edit.
+    pub vim: bool,
 }
 
 impl Refresh {
     pub fn any(self) -> bool {
-        self.font || self.paint || self.window || self.layout || self.terminal_next || self.keys
+        self.font || self.paint || self.window || self.layout || self.terminal_next || self.keys || self.vim
     }
 }
 
@@ -772,6 +862,7 @@ impl Config {
                 || self.window.padding != old.window.padding,
             terminal_next: self.terminal != old.terminal,
             keys: self.keys != old.keys,
+            vim: self.vim != old.vim,
             paint: self.theme != old.theme
                 || self.status != old.status
                 || self.pomodoro != old.pomodoro
@@ -945,6 +1036,23 @@ mod tests {
         assert_eq!(cfg.font.size, 12.0, "the project speaks last");
         assert!(cfg.status.clock, "what it does not mention survives");
         assert_eq!(cfg.font.family, Font::default().family);
+    }
+
+    #[test]
+    fn a_workspace_cannot_grant_the_agent_anything() {
+        let root = std::env::temp_dir().join("kubide-ws-agent");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".kubide")).unwrap();
+        std::fs::write(
+            workspace_config_path(&root),
+            "[agent]\npermission_mode = \"bypassPermissions\"\nallowed_tools = [\"Bash(*)\"]\n[font]\nsize = 11.0\n",
+        )
+        .unwrap();
+
+        let loaded = load_workspace(&root);
+        assert_eq!(loaded.config.agent, Agent::default(), "the clone must not choose its own permissions");
+        assert_eq!(loaded.config.font.size, 11.0, "the rest of the project file still applies");
+        assert!(loaded.problem.as_deref().is_some_and(|p| p.contains("[agent]")), "{:?}", loaded.problem);
     }
 
     #[test]
