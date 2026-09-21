@@ -257,8 +257,9 @@ impl Default for Vim {
 #[serde(default, deny_unknown_fields)]
 pub struct Window {
     pub backdrop: Backdrop,
-    /// How opaque the backdrop's tint is, 0.0 to 1.0. Unset keeps the
-    /// material's own. Linux only — on Windows DWM owns the material.
+    /// How opaque the window's ground is, 0.0 to 1.0. Unset keeps the
+    /// material's own alpha, or the theme background's. On Windows, unset
+    /// also means DWM's material is left untouched under a clear frame.
     pub opacity: Option<f32>,
     /// Title bar height in DIPs.
     pub caption_height: f32,
