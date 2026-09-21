@@ -18,7 +18,9 @@ pub mod watch;
 pub use color::Color;
 pub use keys::{Action, Chord, Keymap, Scope};
 pub use settings::Setting;
-pub use theme::{Ansi, Caption, GitColors, SyntaxColors, TerminalColors, Theme};
+pub use theme::{
+    Ansi, Caption, EditorColors, GitColors, SyntaxColors, SyntaxStyles, TerminalColors, TextStyle, Theme,
+};
 pub use watch::Watcher;
 
 use serde::{Deserialize, Serialize};
@@ -801,10 +803,11 @@ pub fn seed_themes() {
             Err(_) => {
                 let _ = std::fs::write(path, text);
             }
-            // A seed from before themes had a `background`, never edited:
-            // still ours, so it follows the built-in. Anything else on disk
-            // has been touched and stays exactly as it is.
-            Ok(on_disk) if same_text(&on_disk, &without_background(text)) => {
+            // An older seed, never edited: every line of it is still in the
+            // built-in, in order, and the built-in has only gained lines
+            // since. Still ours, so it follows. One edited line breaks the
+            // match and the file stays exactly as it is, which is the point.
+            Ok(on_disk) if on_disk != *text && is_older_seed(&on_disk, text) => {
                 let _ = std::fs::write(path, text);
             }
             Ok(_) => {}
@@ -812,14 +815,15 @@ pub fn seed_themes() {
     }
 }
 
-fn without_background(text: &str) -> String {
-    text.lines().filter(|l| !l.starts_with("background = ")).collect::<Vec<_>>().join("\n")
-}
-
-/// Line endings aside: git's autocrlf decides what a Windows checkout
-/// embeds, and that is not an edit.
-fn same_text(a: &str, b: &str) -> bool {
-    a.lines().map(str::trim_end).eq(b.lines().map(str::trim_end))
+/// Whether `on_disk` is `builtin` with lines missing and nothing else
+/// different. Line endings aside: git's autocrlf decides what a Windows
+/// checkout embeds, and that is not an edit.
+fn is_older_seed(on_disk: &str, builtin: &str) -> bool {
+    let mut rest = builtin.lines().map(str::trim_end);
+    on_disk
+        .lines()
+        .map(str::trim_end)
+        .all(|line| rest.any(|b| b == line))
 }
 
 /// Every theme that can be named right now: "default" first, then the
@@ -1208,5 +1212,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&empty);
         c.theme = resolve_theme_in(&empty, "gruvbox").unwrap().0;
         c
+    }
+}
+
+#[cfg(test)]
+mod seed_tests {
+    use super::is_older_seed;
+
+    #[test]
+    fn a_seed_missing_newer_lines_is_still_ours() {
+        let builtin = "background = \"#000\"\nfg = \"#fff\"\n\n[style]\nkeyword = \"bold\"\n";
+        assert!(is_older_seed("fg = \"#fff\"\n", builtin));
+        assert!(is_older_seed("fg = \"#fff\"\r\n", builtin));
+        // One changed colour and it is the user's file.
+        assert!(!is_older_seed("fg = \"#eee\"\n", builtin));
+        // So is a reordering.
+        assert!(!is_older_seed("fg = \"#fff\"\nbackground = \"#000\"\n", builtin));
     }
 }
