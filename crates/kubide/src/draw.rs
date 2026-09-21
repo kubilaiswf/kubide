@@ -155,6 +155,7 @@ const CHEAT_SHEET: &[Cheat] = &[
     (kb_cfg::Action::RecentFiles, "", "Recent files"),
     (kb_cfg::Action::Find, "", "Find in file"),
     (kb_cfg::Action::Replace, "", "Replace in file"),
+    (kb_cfg::Action::ReplaceInProject, "", "Replace in project"),
     (kb_cfg::Action::FindInProject, "", "Find in project"),
     (kb_cfg::Action::GoToLine, "", "Go to line"),
     (kb_cfg::Action::GitPanel, "", "Git panel"),

@@ -94,6 +94,9 @@ pub enum Action {
     Find,
     Replace,
     FindInProject,
+    /// Replace across every file the project search reaches. Asks first,
+    /// with the counts: it writes to disk, and no single undo covers it.
+    ReplaceInProject,
     GoToLine,
     /// The git panel: stage, commit, read diffs and the log.
     GitPanel,
@@ -186,6 +189,7 @@ impl Action {
         Action::RecentFiles,
         Action::Find,
         Action::Replace,
+        Action::ReplaceInProject,
         Action::FindInProject,
         Action::GoToLine,
         Action::GitPanel,
@@ -257,6 +261,7 @@ impl Action {
             RecentFiles => "Switch between recent files",
             Find => "Find in file",
             Replace => "Replace in file",
+            ReplaceInProject => "Replace in project",
             FindInProject => "Find in project",
             GoToLine => "Go to line",
             GitPanel => "Git: status and commit",
@@ -662,6 +667,7 @@ impl Default for Keymap {
             ("ctrl+shift+tab", RecentFiles),
             ("ctrl+f", Find),
             ("ctrl+h", Replace),
+            ("ctrl+shift+h", ReplaceInProject),
             ("ctrl+shift+f", FindInProject),
             ("ctrl+g", GoToLine),
             // The shifted pair of go-to-line, and the letter is the point.

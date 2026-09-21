@@ -279,6 +279,11 @@ enum Pending {
     ReplaceWhat,
     /// Replace, step two, carrying step one's answer.
     ReplaceWith(String),
+    /// The same two steps across the project, then the question that shows
+    /// how much is about to change: what, with what, and in which files.
+    ProjectReplaceWhat,
+    ProjectReplaceWith(String),
+    ProjectReplaceConfirm(String, String, Vec<PathBuf>),
     /// The git panel asked for a commit message.
     CommitMessage,
     /// Closing a pane whose editor has unsaved work.
@@ -291,6 +296,30 @@ enum Pending {
     /// Opening a file into a pane whose editor has unsaved work, carrying
     /// what was about to be opened there.
     ReplaceUnsaved(PaneId, PathBuf),
+}
+
+/// Replaces `needle` in each of `files` on disk, leaving `keep` alone.
+/// Returns how many were changed, skipped and could not be read or written.
+fn rewrite_files(needle: &str, with: &str, files: &[PathBuf], keep: &[PathBuf]) -> (usize, usize, usize) {
+    let (mut changed, mut skipped, mut failed) = (0, 0, 0);
+    for path in files {
+        if keep.contains(path) {
+            skipped += 1;
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(path) else {
+            failed += 1;
+            continue;
+        };
+        if !text.contains(needle) {
+            continue;
+        }
+        match std::fs::write(path, text.replace(needle, with)) {
+            Ok(()) => changed += 1,
+            Err(_) => failed += 1,
+        }
+    }
+    (changed, skipped, failed)
 }
 
 /// The answers to "what about the unsaved work", in the order they are listed.
@@ -1038,11 +1067,11 @@ impl Kubide {
     /// unsaved work of its own. One with edits keeps them; saving it asks
     /// first, which is the standing rule for a file another program
     /// touched.
-    fn reload_clean_editors(&mut self) {
+    fn reload_clean_editors(&mut self, by: &str) {
         for c in self.content.values_mut() {
             if let Content::Editor(e) = c {
                 if !e.buffer.modified() && e.buffer.changed_on_disk() && e.reload().is_ok() {
-                    e.status = Some("reloaded \u{b7} changed by the agent".into());
+                    e.status = Some(format!("reloaded \u{b7} changed by {by}"));
                 }
             }
         }
@@ -2010,6 +2039,60 @@ impl Kubide {
         self.focus = pane;
     }
 
+    /// Counts what a project replace would touch and asks before doing it.
+    ///
+    /// The files come from the same `git grep` the project search runs, so
+    /// what gets rewritten is what Find in project would have listed —
+    /// tracked and untracked, nothing ignored, no binaries.
+    fn ask_project_replace(&mut self, needle: String, with: String) {
+        let hits = self.git.grep(&needle, usize::MAX).unwrap_or_default();
+        let count: usize = hits.iter().map(|h| h.text.matches(needle.as_str()).count()).sum();
+        let mut files: Vec<PathBuf> = hits.into_iter().map(|h| h.path).collect();
+        files.dedup();
+        if count == 0 {
+            self.warn(&format!("'{needle}' is nowhere in the project"));
+            return;
+        }
+        let (o, f) = (
+            if count == 1 { "occurrence" } else { "occurrences" },
+            if files.len() == 1 { "file" } else { "files" },
+        );
+        let question = format!(
+            "'{needle}' becomes '{with}': {count} {o} in {} {f}. Written straight to disk.",
+            files.len()
+        );
+        self.palette = Some(Palette::ask("replace in project", &question, &["Replace", "Cancel"]));
+        self.pending = Some(Pending::ProjectReplaceConfirm(needle, with, files));
+    }
+
+    /// Rewrites `files` on disk, then reloads the editors showing them.
+    ///
+    /// A file open with unsaved edits is skipped rather than merged or
+    /// overwritten: the buffer and the disk would disagree either way, and
+    /// the one thing this must not do is cost someone typed work.
+    fn replace_in_project(&mut self, needle: &str, with: &str, files: &[PathBuf]) {
+        let dirty: Vec<PathBuf> = self
+            .content
+            .values()
+            .filter_map(|c| match c {
+                Content::Editor(e) if e.buffer.modified() => e.buffer.path().map(Path::to_path_buf),
+                _ => None,
+            })
+            .collect();
+        let (changed, skipped, failed) = rewrite_files(needle, with, files, &dirty);
+        self.reload_clean_editors("the replace");
+        self.git.refresh();
+        self.refresh_git_panel();
+        let mut note = format!("replaced in {changed} {}", if changed == 1 { "file" } else { "files" });
+        if skipped > 0 {
+            note.push_str(&format!(" \u{b7} {skipped} skipped, unsaved here"));
+        }
+        if failed > 0 {
+            note.push_str(&format!(" \u{b7} {failed} could not be written"));
+        }
+        self.warn(&note);
+    }
+
     /// Replaces every occurrence in the focused editor, as one undo step.
     ///
     /// The occurrences come from the same matcher Find uses, so this changes
@@ -2205,6 +2288,9 @@ impl Kubide {
                 self.save_session();
                 kb_win::quit();
             }
+            Pending::ProjectReplaceConfirm(needle, with, files) if index == 0 => {
+                self.replace_in_project(&needle, &with, &files);
+            }
             // The text prompts answer through `apply_prompt`; putting one
             // back would lose it, so they are dropped here deliberately.
             _ => {}
@@ -2278,6 +2364,16 @@ impl Kubide {
                 self.replace_all(&needle, &answer);
                 return;
             }
+            Pending::ProjectReplaceWhat => {
+                self.pending = Some(Pending::ProjectReplaceWith(answer.clone()));
+                self.palette =
+                    Some(Palette::prompt(&format!("replace '{answer}' everywhere with"), ""));
+                return;
+            }
+            Pending::ProjectReplaceWith(needle) => {
+                self.ask_project_replace(needle, answer);
+                return;
+            }
             Pending::CommitMessage => {
                 let result = self.git.commit(&answer);
                 if let Some(Content::Git(g)) = self.content.get_mut(&self.focus) {
@@ -2299,6 +2395,7 @@ impl Kubide {
             // mean a choice was left waiting while a text prompt opened, which
             // cannot happen — but dropping it beats acting on the wrong one.
             Pending::CloseUnsaved(_)
+            | Pending::ProjectReplaceConfirm(..)
             | Pending::QuitUnsaved
             | Pending::SwitchUnsaved(_)
             | Pending::ReplaceUnsaved(..) => return,
@@ -3285,7 +3382,7 @@ impl Handler for Kubide {
             agent_changed = true;
         }
         if edited {
-            self.reload_clean_editors();
+            self.reload_clean_editors("the agent");
             self.git.refresh();
             for c in self.content.values_mut() {
                 if let Content::Explorer(e) = c {
@@ -3816,6 +3913,20 @@ impl Kubide {
                 self.pending = Some(Pending::ProjectSearch);
                 self.palette = Some(Palette::prompt("search", ""));
             }
+            ReplaceInProject => {
+                if !self.git.is_repo() {
+                    self.warn("project replace needs a git repository");
+                    return true;
+                }
+                let initial = match self.content.get(&self.focus) {
+                    Some(Content::Editor(e)) => {
+                        e.buffer.selected_text().filter(|s| !s.contains('\n')).unwrap_or_default()
+                    }
+                    _ => String::new(),
+                };
+                self.pending = Some(Pending::ProjectReplaceWhat);
+                self.palette = Some(Palette::prompt("replace everywhere", &initial));
+            }
             ToggleComment => {
                 let marker = self.comment_marker();
                 if let Some(Content::Editor(e)) = self.content.get_mut(&self.focus) {
@@ -4119,4 +4230,27 @@ fn main() -> Result<()> {
         ..Default::default()
     };
     Ok(kb_win::run(window, Box::new(app))?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_project_replace_leaves_unsaved_files_alone() {
+        let dir = std::env::temp_dir().join("kubide-project-replace");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (a, b, gone) = (dir.join("a.rs"), dir.join("b.rs"), dir.join("gone.rs"));
+        std::fs::write(&a, "old old\nnew\n").unwrap();
+        std::fs::write(&b, "old\n").unwrap();
+
+        let files = [a.clone(), b.clone(), gone];
+        let counts = rewrite_files("old", "fresh", &files, std::slice::from_ref(&b));
+
+        assert_eq!(counts, (1, 1, 1));
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "fresh fresh\nnew\n");
+        // Open with unsaved edits: the disk copy is not touched under it.
+        assert_eq!(std::fs::read_to_string(&b).unwrap(), "old\n");
+    }
 }
