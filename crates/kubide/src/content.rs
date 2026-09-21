@@ -237,6 +237,8 @@ pub struct Editor {
     /// The caret position and revision the view last followed. The gate
     /// that keeps caret-following out of wheel scrolling's way.
     caret_seen: Option<(kb_edit::Pos, u64)>,
+    /// Set by [`Editor::reveal`]; the next draw clamps `top` to the file.
+    settle: bool,
     /// The pane's vim state: mode, pending keys, marks. Always present and
     /// consulted only while vim mode is on, so switching it on mid-session
     /// finds every pane in normal mode rather than in whatever it was doing.
@@ -259,6 +261,7 @@ impl Editor {
             marks: Vec::new(),
             marks_at: None,
             caret_seen: None,
+            settle: false,
             vim: kb_vim::Vim::new(),
         }
     }
@@ -308,6 +311,16 @@ impl Editor {
 }
 
 impl Editor {
+    /// Moves the caret to `pos` with a few lines of context above it.
+    ///
+    /// The pane height is not known here, so the next draw clamps `top`:
+    /// a file that fits is shown from its first line.
+    pub fn reveal(&mut self, pos: kb_edit::Pos) {
+        self.buffer.move_to(pos, false);
+        self.top = pos.line.saturating_sub(4);
+        self.settle = true;
+    }
+
     /// Scrolls so the cursor stays on screen, with a little margin.
     ///
     /// Called from drawing, because only the renderer knows how many lines
@@ -319,6 +332,9 @@ impl Editor {
     pub fn ensure_visible(&mut self, visible: usize, cols: usize) {
         if visible == 0 {
             return;
+        }
+        if std::mem::take(&mut self.settle) {
+            self.top = self.top.min(self.buffer.len().saturating_sub(visible));
         }
         let now = (self.buffer.cursor, self.buffer.revision());
         if self.caret_seen == Some(now) {
@@ -930,6 +946,19 @@ mod tests {
         let w = Welcome::new(cwd, vec![cwd.to_path_buf(), PathBuf::from("/w/older")]);
         assert_eq!(w.rows[0].0, "me (this folder)");
         assert_eq!(w.rows.len(), 2);
+    }
+
+    #[test]
+    fn revealing_the_last_line_of_a_short_file_shows_the_whole_file() {
+        let mut e = Editor::new(kb_edit::Buffer::from_text(&"line\n".repeat(23)));
+        e.reveal(kb_edit::Pos::new(23, 0));
+        e.ensure_visible(40, 80);
+        assert_eq!(e.top, 0, "it all fits, so none of it is scrolled away");
+
+        let mut e = Editor::new(kb_edit::Buffer::from_text(&"line\n".repeat(200)));
+        e.reveal(kb_edit::Pos::new(100, 0));
+        e.ensure_visible(40, 80);
+        assert_eq!(e.top, 96);
     }
 
     #[test]

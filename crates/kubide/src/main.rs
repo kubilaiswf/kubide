@@ -1865,10 +1865,7 @@ impl Kubide {
             }
             Target::Pos(pos) => {
                 if let Some(Content::Editor(e)) = self.content.get_mut(&self.focus) {
-                    e.buffer.move_to(pos, false);
-                    // Centre it: landing on the last visible row means seeing
-                    // no context after what you searched for.
-                    e.top = pos.line.saturating_sub(4);
+                    e.reveal(pos);
                 }
             }
         }
@@ -1987,8 +1984,7 @@ impl Kubide {
                     if path.is_file() {
                         let mut content = Content::open_path(&path);
                         if let Content::Editor(e) = &mut content {
-                            e.buffer.move_to(kb_edit::Pos::new(line, col), false);
-                            e.top = line.saturating_sub(4);
+                            e.reveal(kb_edit::Pos::new(line, col));
                         }
                         self.content.insert(id, content);
                     }
@@ -2021,9 +2017,7 @@ impl Kubide {
             self.content.insert(target, Content::open_path(&path));
         }
         if let Some(Content::Editor(e)) = self.content.get_mut(&target) {
-            e.buffer.move_to(pos, false);
-            // Centred, so the match has context above and below it.
-            e.top = pos.line.saturating_sub(4);
+            e.reveal(pos);
         }
         self.focus = target;
     }
