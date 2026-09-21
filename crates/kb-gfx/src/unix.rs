@@ -314,13 +314,14 @@ fn blend(dst: &mut PremultipliedColorU8, r: f32, g: f32, b: f32, a: f32) {
 /// for DWM's materials. The compositor may blur what is behind a window
 /// with alpha; the tint is ours either way, and it is what makes text on a
 /// bright wallpaper readable.
-fn material(b: kb_win::Backdrop) -> tiny_skia::Color {
+fn material(b: kb_win::Backdrop, opacity: Option<f32>) -> tiny_skia::Color {
     let (v, a) = match b {
         kb_win::Backdrop::None => (0x1e, 1.0),
         kb_win::Backdrop::Mica => (0x20, 0.94),
         kb_win::Backdrop::MicaAlt => (0x0c, 0.94),
         kb_win::Backdrop::Acrylic => (0x2a, 0.78),
     };
+    let a = opacity.map_or(a, |o| o.clamp(0.0, 1.0));
     tiny_skia::Color::from_rgba8(v, v, v, (a * 255.0) as u8)
 }
 
@@ -428,7 +429,7 @@ impl Renderer {
             Some(p) if p.width() == w && p.height() == h => p,
             _ => Pixmap::new(w, h).ok_or_else(|| Error(format!("no pixmap for {w}x{h}")))?,
         };
-        pixmap.fill(material(kb_win::current_backdrop()));
+        pixmap.fill(material(kb_win::current_backdrop(), kb_win::current_opacity()));
         Ok(Canvas { inner: RefCell::new(Inner { pixmap, clips: Vec::new(), mask: None }) })
     }
 

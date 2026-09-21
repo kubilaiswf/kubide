@@ -28,6 +28,7 @@ pub enum Setting {
     StatusClock,
     StatusClock24h,
     WindowBackdrop,
+    WindowOpacity,
     WindowPadding,
     WindowCaptionHeight,
     ThemeFile,
@@ -71,6 +72,7 @@ impl Setting {
         Setting::StatusClock,
         Setting::StatusClock24h,
         Setting::WindowBackdrop,
+        Setting::WindowOpacity,
         Setting::WindowPadding,
         Setting::WindowCaptionHeight,
         Setting::ThemeFile,
@@ -97,7 +99,7 @@ impl Setting {
         match self {
             StatusCursor | StatusFont | StatusPanes | StatusFrameTime | StatusGit
             | StatusPomodoro | StatusClock | StatusClock24h => "STATUS BAR",
-            WindowBackdrop | WindowPadding | WindowCaptionHeight => "WINDOW",
+            WindowBackdrop | WindowOpacity | WindowPadding | WindowCaptionHeight => "WINDOW",
             ThemeFile => "THEME",
             FontSize => "FONT",
             EditorAutoClose | EditorSnippets => "EDITOR",
@@ -123,6 +125,7 @@ impl Setting {
             StatusClock => "Clock",
             StatusClock24h => "24-hour clock",
             WindowBackdrop => "Backdrop",
+            WindowOpacity => "Opacity",
             WindowPadding => "Padding",
             WindowCaptionHeight => "Title bar height",
             ThemeFile => "Theme",
@@ -154,6 +157,13 @@ impl Setting {
                 Backdrop::Mica => "MICA".into(),
                 Backdrop::MicaAlt => "MICA ALT".into(),
                 Backdrop::Acrylic => "ACRYLIC".into(),
+            },
+            // AUTO while the material decides: the number would otherwise
+            // change under the backdrop row, and a row must only ever move
+            // when it is the one being pressed.
+            WindowOpacity => match cfg.window.opacity {
+                Some(o) => format!("{:.0}%", o.clamp(0.0, 1.0) * 100.0),
+                None => "AUTO".into(),
             },
             WindowPadding => format!("{:.0}", cfg.window.padding),
             WindowCaptionHeight => format!("{:.0}", cfg.window.caption_height),
@@ -265,6 +275,13 @@ impl Setting {
             // Numbers clamp instead. There is a smallest sensible font and a
             // largest sensible title bar, and wrapping from one to the other
             // would look like a bug.
+            // Stepping from "unset" starts at what the material was already
+            // painting, so the first press moves it 5% and not to some
+            // unrelated number.
+            WindowOpacity => {
+                let next = number(cfg.window.opacity_or_default() * 100.0, delta, 5.0, 0.0, 100.0);
+                cfg.window.opacity = Some((next / 100.0 * 20.0).round() / 20.0);
+            }
             WindowPadding => cfg.window.padding = number(cfg.window.padding, delta, 2.0, 0.0, 48.0),
             WindowCaptionHeight => {
                 cfg.window.caption_height = number(cfg.window.caption_height, delta, 2.0, 24.0, 80.0)
@@ -391,6 +408,20 @@ mod tests {
         assert_eq!(cfg.window.backdrop, Backdrop::Acrylic);
         Setting::WindowBackdrop.step(&mut cfg, 1);
         assert_eq!(cfg.window.backdrop, Backdrop::None);
+    }
+
+    #[test]
+    fn opacity_steps_from_what_the_material_paints() {
+        let mut cfg = Config::default();
+        cfg.window.backdrop = Backdrop::Acrylic;
+        assert_eq!(Setting::WindowOpacity.value(&cfg), "AUTO");
+        Setting::WindowOpacity.step(&mut cfg, 1);
+        assert_eq!(cfg.window.opacity, Some(0.85));
+        for _ in 0..10 {
+            Setting::WindowOpacity.step(&mut cfg, 1);
+        }
+        assert_eq!(cfg.window.opacity, Some(1.0));
+        assert_eq!(Setting::WindowOpacity.value(&cfg), "100%");
     }
 
     #[test]

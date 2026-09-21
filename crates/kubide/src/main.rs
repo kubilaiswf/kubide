@@ -529,6 +529,7 @@ impl Kubide {
         if let Some(window) = self.window {
             if refresh.window {
                 kb_win::set_backdrop(window, backdrop_of(self.cfg.window.backdrop));
+                kb_win::set_opacity(window, Some(self.cfg.window.opacity_or_default()));
             }
             if refresh.layout {
                 kb_win::set_caption_height(window, self.cfg.window.caption_height as i32);
@@ -1208,6 +1209,9 @@ impl Kubide {
 
     /// Leaves the settings screen, putting back whatever it covered.
     fn close_settings(&mut self) -> bool {
+        if matches!(self.content.get(&self.focus), Some(Content::Settings(s)) if s.unsaved) {
+            self.save_config();
+        }
         let Some(Content::Settings(s)) = self.content.get_mut(&self.focus) else {
             return false;
         };
@@ -1234,6 +1238,7 @@ impl Kubide {
         let path = kb_cfg::config_path();
         let result = kb_cfg::save_named(&self.cfg, self.cfg.theme_name.as_deref(), &path);
         if let Some(Content::Settings(s)) = self.content.get_mut(&self.focus) {
+            s.unsaved = result.is_err();
             s.status = Some(match &result {
                 Ok(()) => format!("written to {}", path.display()),
                 Err(e) => format!("could not write: {e}"),
@@ -2458,6 +2463,7 @@ impl Kubide {
 
         let setting = s.setting();
         s.status = None;
+        s.unsaved = true;
         let mut next = self.cfg.clone();
         setting.step(&mut next, delta);
         self.apply_config(next);
@@ -4080,6 +4086,7 @@ fn main() -> Result<()> {
     let window = WindowConfig {
         title: title_for(&workspace.dir),
         backdrop: backdrop_of(app.cfg.window.backdrop),
+        opacity: Some(app.cfg.window.opacity_or_default()),
         caption_h: app.cfg.window.caption_height as i32,
         // Opened where it was closed. The default size stays as the answer
         // for a first run and for a place that no longer exists.

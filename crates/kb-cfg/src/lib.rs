@@ -216,6 +216,9 @@ impl Default for Vim {
 #[serde(default, deny_unknown_fields)]
 pub struct Window {
     pub backdrop: Backdrop,
+    /// How opaque the backdrop's tint is, 0.0 to 1.0. Unset keeps the
+    /// material's own. Linux only — on Windows DWM owns the material.
+    pub opacity: Option<f32>,
     /// Title bar height in DIPs.
     pub caption_height: f32,
     /// Gap between the window edge and the pane area.
@@ -256,10 +259,30 @@ pub struct Terminal {
     pub scrollback: usize,
 }
 
+impl Backdrop {
+    /// The tint's alpha when `[window] opacity` leaves it alone. One table
+    /// for the renderer and the settings screen, so the screen shows the
+    /// number actually being painted.
+    pub fn default_opacity(self) -> f32 {
+        match self {
+            Backdrop::None => 1.0,
+            Backdrop::Mica | Backdrop::MicaAlt => 0.94,
+            Backdrop::Acrylic => 0.78,
+        }
+    }
+}
+
+impl Window {
+    pub fn opacity_or_default(&self) -> f32 {
+        self.opacity.unwrap_or_else(|| self.backdrop.default_opacity()).clamp(0.0, 1.0)
+    }
+}
+
 impl Default for Window {
     fn default() -> Self {
         Self {
             backdrop: Backdrop::Acrylic,
+            opacity: None,
             caption_height: 40.0,
             padding: 14.0,
         }
@@ -857,7 +880,8 @@ impl Config {
     pub fn refresh_from(&self, old: &Config) -> Refresh {
         Refresh {
             font: self.font != old.font,
-            window: self.window.backdrop != old.window.backdrop,
+            window: self.window.backdrop != old.window.backdrop
+                || self.window.opacity != old.window.opacity,
             layout: self.window.caption_height != old.window.caption_height
                 || self.window.padding != old.window.padding,
             terminal_next: self.terminal != old.terminal,

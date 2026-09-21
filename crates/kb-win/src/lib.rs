@@ -80,6 +80,8 @@ pub struct WindowConfig {
     /// Height of the draggable strip, at 96 DPI.
     pub caption_h: i32,
     pub backdrop: Backdrop,
+    /// Overrides the backdrop tint's alpha where we paint it ourselves.
+    pub opacity: Option<f32>,
     /// Where a previous run left the window. `None` lets the system choose,
     /// which is what a first run wants.
     pub place: Option<Placement>,
@@ -93,6 +95,7 @@ impl Default for WindowConfig {
             height: 800,
             caption_h: 40,
             backdrop: Backdrop::Acrylic,
+            opacity: None,
             place: None,
         }
     }

@@ -45,6 +45,11 @@
 # windows with alpha, GNOME does not.
 backdrop = "acrylic"
 
+# How opaque that tint is, 0.0 to 1.0; 1.0 is fully matte. Unset keeps the
+# material's own (acrylic 0.78, mica 0.94). Linux only — on Windows DWM
+# decides.
+# opacity = 1.0
+
 # Height of the draggable title strip, and the gap around the pane area.
 caption_height = 40.0
 padding = 14.0
