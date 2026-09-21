@@ -14,6 +14,7 @@ members = [
     "crates/kb-syn",
     "crates/kb-vim",
     "crates/kb-agent",
+    "crates/kb-lsp",
     "crates/kubide",
 ]
 

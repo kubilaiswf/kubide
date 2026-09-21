@@ -1,0 +1,13 @@
+[package]
+name = "kb-lsp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+# A language server is someone else's program speaking JSON-RPC over a pipe;
+# this crate is the framing, the handful of messages the editor uses, and
+# the process around them. No lsp-types: that is forty thousand lines of
+# structs for the dozen fields read here, and serde_json is already in the
+# tree for the agent.
+[dependencies]
+serde_json = "1"
