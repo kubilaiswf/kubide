@@ -5,6 +5,7 @@
 # Anything you leave out keeps kubide's default — a theme can be one line.
 # Colours are "#rrggbb", or "#rrggbbaa" when they carry transparency.
 
+background = "#1d2021e6" # the window itself; the alpha is how much desktop stays
 fg = "#ebdbb2"        # main text
 dim = "#a89984"       # labels, hints, line numbers
 accent = "#83a598"    # focus, selection, highlights
@@ -52,6 +53,17 @@ deleted = "#fb4934"
 untracked = "#83a598"
 conflicted = "#d3869b"
 
+# The editor's own marks. All optional: left out, each is mixed from accent,
+# dim and warning. A colour written here is used as is, alpha included.
+[editor]
+# selection = "#83a59847"
+# current_line = "#ebdbb20a"      # not drawn at all unless set
+# line_number = "#a89984"
+# line_number_active = "#ebdbb2"
+# caret = "#ebdbb2"
+# search = "#fabd2f38"
+# bracket = "#83a5984d"
+
 [syntax]
 keyword = "#fb4934"
 function = "#8ec07c"
@@ -65,3 +77,9 @@ punctuation = "#a89984"
 variable = "#ebdbb2"
 property = "#83a598"
 attribute = "#fe8019"
+
+# Weight and slant per syntax role: "bold", "italic", "bold italic" or
+# "normal". Same role names as the syntax table; anything left out is normal.
+[style]
+# keyword = "bold"
+# comment = "italic"

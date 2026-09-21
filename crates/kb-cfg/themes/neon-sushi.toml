@@ -4,6 +4,7 @@
 # cyan-and-pink pair on charcoal. The two neons carry the whole theme:
 # cyan is where you are, pink is what matters.
 
+background = "#252a34e6" # the window itself; the alpha is how much desktop stays
 fg = "#eaeaea"        # main text
 dim = "#8b93a3"       # labels, hints, line numbers
 accent = "#08d9d6"    # focus, selection, highlights

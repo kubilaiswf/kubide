@@ -5,6 +5,7 @@
 # light-over-a-bright-wallpaper has had less testing than the dark themes,
 # and the acrylic backdrop glows more the lighter the theme gets.
 
+background = "#f9f7f7e6" # the window itself; the alpha is how much desktop stays
 fg = "#112d4e"        # main text — the palette's ink
 dim = "#6b83a2"       # labels, hints, line numbers
 accent = "#3f72af"    # focus, selection, highlights

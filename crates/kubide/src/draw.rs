@@ -41,6 +41,16 @@ const CHOICE_ROWS: usize = 9;
 
 /// The backdrop of an overlay: the theme's colour, never thinner than
 /// [`OVERLAY_FLOOR`]. A theme is free to ask for more.
+/// A theme's own colour for an editor mark when it names one, the mix the
+/// editor always used otherwise. A named colour keeps its alpha and only
+/// fades with focus, like everything else in an unfocused pane.
+fn mark(own: Option<kb_cfg::Color>, fallback: kb_cfg::Color, alpha: f32, focused: bool) -> Color {
+    match own {
+        Some(c) => themed(c, if focused { 1.0 } else { 0.55 }),
+        None => themed(fallback, alpha),
+    }
+}
+
 fn overlay(c: kb_cfg::Color) -> Color {
     let (r, g, b, a) = c.f32s();
     rgba(r, g, b, a.max(OVERLAY_FLOOR))
@@ -93,6 +103,34 @@ fn syntax_color(c: &kb_cfg::SyntaxColors, k: kb_syn::Kind) -> kb_cfg::Color {
     }
 }
 
+fn syntax_style(c: &kb_cfg::SyntaxStyles, k: kb_syn::Kind) -> kb_text::FontStyle {
+    use kb_syn::Kind::*;
+    let s = match k {
+        Keyword => c.keyword,
+        Function => c.function,
+        Type => c.type_,
+        String => c.string,
+        Number => c.number,
+        Comment => c.comment,
+        Constant => c.constant,
+        Operator => c.operator,
+        Punctuation => c.punctuation,
+        Variable => c.variable,
+        Property => c.property,
+        Attribute => c.attribute,
+    };
+    kb_text::FontStyle { bold: s.bold, italic: s.italic }
+}
+
+fn severity_color(theme: &kb_cfg::Theme, s: kb_lsp::Severity) -> kb_cfg::Color {
+    match s {
+        kb_lsp::Severity::Error => theme.error,
+        kb_lsp::Severity::Warning => theme.warning,
+        kb_lsp::Severity::Info => theme.accent,
+        kb_lsp::Severity::Hint => theme.dim,
+    }
+}
+
 fn git_color(c: &kb_cfg::GitColors, s: kb_git::Status) -> kb_cfg::Color {
     match s {
         kb_git::Status::Modified => c.modified,
@@ -123,10 +161,16 @@ const CHEAT_SHEET: &[Cheat] = &[
     (kb_cfg::Action::OpenFolder, "", "Open folder"),
     (kb_cfg::Action::GoToFile, "", "Go to file"),
     (kb_cfg::Action::LastFile, "", "Switch to last file"),
+    (kb_cfg::Action::RecentFiles, "", "Recent files"),
     (kb_cfg::Action::Find, "", "Find in file"),
     (kb_cfg::Action::Replace, "", "Replace in file"),
+    (kb_cfg::Action::ReplaceInProject, "", "Replace in project"),
     (kb_cfg::Action::FindInProject, "", "Find in project"),
     (kb_cfg::Action::GoToLine, "", "Go to line"),
+    (kb_cfg::Action::GoToDefinition, "", "Go to definition"),
+    (kb_cfg::Action::Hover, "", "Type and docs"),
+    (kb_cfg::Action::Complete, "", "Complete"),
+    (kb_cfg::Action::Format, "", "Format"),
     (kb_cfg::Action::GitPanel, "", "Git panel"),
     (kb_cfg::Action::OpenAgent, "", "Claude agent"),
     (kb_cfg::Action::Save, "", "Save"),
@@ -167,6 +211,30 @@ fn cell_bg(c: &kb_term::Cell, selection: kb_term::Rgb) -> kb_term::Rgb {
 }
 
 impl Kubide {
+    /// What the frame is cleared to: the theme's background, or the
+    /// material's grey, at the configured opacity.
+    ///
+    /// On Windows DWM paints the material, so with nothing configured the
+    /// frame stays clear and the material is left alone — a tint appears
+    /// only once the theme or the opacity asks for one. Linux has no
+    /// material behind the window, so there the tint always is one.
+    fn frame_tint(&self) -> Option<Color> {
+        let window = &self.cfg.window;
+        let background = self.cfg.theme.background;
+        if cfg!(windows) && background.is_none() && window.opacity.is_none() {
+            return None;
+        }
+        let grey = window.backdrop.grey();
+        let base = background.unwrap_or(kb_cfg::Color::rgb(grey, grey, grey));
+        let alpha = match (window.opacity, background) {
+            (Some(o), _) => o.clamp(0.0, 1.0),
+            (None, Some(bg)) => bg.f32s().3,
+            (None, None) => window.backdrop.default_opacity(),
+        };
+        let (r, g, b, _) = base.f32s();
+        Some(kb_gfx::rgba(r, g, b, alpha))
+    }
+
     pub(crate) fn render(&mut self, window: kb_win::Window, chrome: &Chrome) -> Result<()> {
         if self.gfx.is_none() {
             let (w, h) = kb_win::client_size(window);
@@ -181,7 +249,7 @@ impl Kubide {
             self.relayout(w, h);
         }
         // A frame that cannot start is not a reason to lose the renderer.
-        let dc = match gfx.begin() {
+        let dc = match gfx.begin(self.frame_tint()) {
             Ok(dc) => dc,
             Err(e) => {
                 self.gfx = Some(gfx);
@@ -658,6 +726,24 @@ impl Kubide {
             )
         };
 
+        // What the language server has to say about the lines on screen.
+        let complaints: Vec<kb_lsp::Diagnostic> = match self.content.get(&pane) {
+            Some(Content::Editor(e)) => e
+                .buffer
+                .path()
+                .map(|p| {
+                    self.lsp
+                        .diagnostics(p)
+                        .iter()
+                        .filter(|d| d.end.line >= top && d.start.line < top + visible)
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        let hover = self.hover.as_ref().filter(|(p, _)| *p == pane).map(|(_, t)| t.clone());
+
         let theme = self.cfg.theme;
         // Recomputed with the scrolled `top`: ensure_visible may have moved it.
         let area = TextArea::new(r, lh, cw, top);
@@ -678,10 +764,35 @@ impl Kubide {
             &dim,
         );
 
-        if let Some(s) = &status {
-            let brush = dc.solid(themed(if s.starts_with("save failed") { theme.error } else { theme.accent }, 0.9))?;
+        // The complaint about the caret's line, when nothing more urgent is
+        // using the space: reading the message should not take a mouse.
+        let complaint = crate::lsp::worst_on_line(&complaints, cursor.line).filter(|_| focused);
+        let status = match (&status, complaint) {
+            (Some(s), _) => Some((s.clone(), if s.starts_with("save failed") { theme.error } else { theme.accent })),
+            (None, Some(d)) => {
+                let first = d.message.lines().next().unwrap_or_default();
+                let text = match &d.source {
+                    Some(source) => format!("{source}: {first}"),
+                    None => first.to_string(),
+                };
+                Some((text, severity_color(&theme, d.severity)))
+            }
+            (None, None) => None,
+        };
+        if let Some((s, color)) = &status {
+            let brush = dc.solid(themed(*color, 0.9))?;
             // Measured, not guessed: a fixed offset clips the message
             // mid-word as soon as it is longer than the guess.
+            // Beside the header, never over it: a long compiler message is
+            // cut with an ellipsis rather than drawn across the file name.
+            let room = r.right() - INSET - (r.x + 10.0 + self.text.width_of(&header) + 3.0 * cw);
+            let fits = (room / cw).floor().max(0.0) as usize;
+            let shown: String = if s.chars().count() > fits && fits > 1 {
+                s.chars().take(fits - 1).chain(std::iter::once('\u{2026}')).collect()
+            } else {
+                s.clone()
+            };
+            let s = &shown;
             let x = (r.right() - INSET - self.text.width_of(s)).max(r.x + INSET);
             let layout = self.text.volatile(s)?;
             dc.text(
@@ -693,9 +804,23 @@ impl Kubide {
 
         dc.push_clip(&Bounds { left: r.x, top: r.y, right: r.right(), bottom: r.bottom() });
 
+        // The caret's line, under everything else that marks the text.
+        if let Some(c) = theme.editor.current_line {
+            if focused && cursor.line >= top && cursor.line < top + visible {
+                let y = y0 + (cursor.line - top) as f32 * lh;
+                let brush = dc.solid(themed(c, 1.0))?;
+                dc.fill_rect(&Bounds { left: r.x, top: y, right: r.right(), bottom: y + lh }, &brush);
+            }
+        }
+
         // Search matches, under the selection: what `n` will land on.
         if let Some(re) = &hl {
-            let brush = dc.solid(themed(theme.warning, if focused { 0.22 } else { 0.12 }))?;
+            let brush = dc.solid(mark(
+                theme.editor.search,
+                theme.warning,
+                if focused { 0.22 } else { 0.12 },
+                focused,
+            ))?;
             for (i, line) in lines.iter().enumerate() {
                 let chars: Vec<char> = line.chars().collect();
                 let y = y0 + i as f32 * lh;
@@ -720,7 +845,12 @@ impl Kubide {
         // Selection, per visible line. Columns are character counts, so
         // the x positions come from the cell width, not from measuring.
         if let Some((start, end)) = selection {
-            let brush = dc.solid(themed(theme.accent, if focused { 0.28 } else { 0.14 }))?;
+            let brush = dc.solid(mark(
+                theme.editor.selection,
+                theme.accent,
+                if focused { 0.28 } else { 0.14 },
+                focused,
+            ))?;
             for (i, line) in lines.iter().enumerate() {
                 let ln = top + i;
                 if ln < start.line || ln > end.line {
@@ -751,7 +881,7 @@ impl Kubide {
         // selection. Only while the pane is focused: the highlight
         // follows the caret, and the caret is not drawn either.
         if let Some(pair) = brackets.filter(|_| focused) {
-            let brush = dc.solid(themed(theme.accent, 0.30))?;
+            let brush = dc.solid(mark(theme.editor.bracket, theme.accent, 0.30, true))?;
             for p in [pair.0, pair.1] {
                 if p.line < top || p.line >= top + visible || p.col < left {
                     continue;
@@ -781,9 +911,15 @@ impl Kubide {
                     (Bounds { left: x, top: y + lh - 2.0, right: x + cw, bottom: y + lh }, 1.0)
                 }
             };
-            let brush = dc.solid(themed(theme.terminal.cursor, alpha))?;
+            let brush = dc.solid(themed(theme.editor.caret.unwrap_or(theme.terminal.cursor), alpha))?;
             dc.fill_rect(&rect, &brush);
         }
+
+        let number = dc.solid(mark(theme.editor.line_number, theme.dim, if focused { 1.0 } else { 0.5 }, focused))?;
+        let number_active = match theme.editor.line_number_active {
+            Some(c) => Some(dc.solid(themed(c, if focused { 1.0 } else { 0.55 }))?),
+            None => None,
+        };
 
         for (i, line) in lines.iter().enumerate() {
             let y = y0 + i as f32 * lh;
@@ -791,7 +927,10 @@ impl Kubide {
             dc.text(
                 Point { x: r.x + 10.0, y },
                 &num,
-                &dim,
+                match &number_active {
+                    Some(active) if top + i == cursor.line => active,
+                    _ => &number,
+                },
             );
 
             // What changed since the last commit: a thin bar in the strip
@@ -871,7 +1010,8 @@ impl Kubide {
                                 syntax_color(&theme.syntax, span.kind),
                                 if focused { 1.0 } else { 0.62 },
                             ))?;
-                        let layout = self.text.line(&run)?;
+                        let layout =
+                            self.text.line_styled(&run, syntax_style(&theme.style, span.kind))?;
                         dc.text(
                             Point { x: text_x + (start - left) as f32 * cw, y },
                             &layout,
@@ -892,6 +1032,59 @@ impl Kubide {
                         &fg,
                     );
                 }
+            }
+        }
+
+        // Complaints, under the text they are about. A plain rule rather
+        // than a squiggle: at one and a half pixels a wave is a smudge.
+        for d in &complaints {
+            let brush = dc.solid(themed(severity_color(&theme, d.severity), if focused { 0.9 } else { 0.5 }))?;
+            for (i, line) in lines.iter().enumerate() {
+                let len = line.chars().count();
+                let Some((from, to)) = crate::lsp::span_on_line(d, top + i, len) else { continue };
+                if to <= left {
+                    continue;
+                }
+                let y = y0 + i as f32 * lh + lh - 2.0;
+                let x0 = text_x + from.saturating_sub(left) as f32 * cw;
+                let x1 = text_x + (to - left) as f32 * cw;
+                dc.fill_rect(&Bounds { left: x0, top: y, right: x1, bottom: y + 1.5 }, &brush);
+            }
+        }
+
+        // What the server said about the thing under the caret, in a box
+        // below it — or above, when below would run off the pane.
+        if let Some(text) = hover.filter(|_| cursor.line >= top && cursor.line < top + visible) {
+            let max_cols = (((r.right() - text_x) / cw) as usize).saturating_sub(4).max(20);
+            let rows: Vec<String> = text
+                .lines()
+                .take(12)
+                .map(|l| {
+                    if l.chars().count() > max_cols {
+                        l.chars().take(max_cols - 1).chain(std::iter::once('\u{2026}')).collect()
+                    } else {
+                        l.to_string()
+                    }
+                })
+                .collect();
+            let widest = rows.iter().map(|l| l.chars().count()).max().unwrap_or(0) as f32 * cw;
+            let (w, h) = (widest + 2.0 * cw, rows.len() as f32 * lh + 0.6 * lh);
+            let caret_y = y0 + (cursor.line - top) as f32 * lh;
+            let below = caret_y + lh + 2.0;
+            let y = if below + h <= r.bottom() { below } else { (caret_y - h - 2.0).max(r.y) };
+            let x = (text_x + cursor.col.saturating_sub(left) as f32 * cw).min(r.right() - w - 4.0).max(r.x + 4.0);
+            let shape = RoundedRect {
+                rect: Bounds { left: x, top: y, right: x + w, bottom: y + h },
+                radius_x: 5.0,
+                radius_y: 5.0,
+            };
+            let panel = dc.solid(overlay(theme.overlay))?;
+            let edge = dc.solid(themed(theme.accent, 0.45))?;
+            dc.fill_rounded(&shape, &panel);
+            dc.stroke_rounded(&shape, &edge, 1.0);
+            for (i, row) in rows.iter().enumerate() {
+                let layout = self.text.volatile(row)?;
+                dc.text(Point { x: x + cw, y: y + 0.3 * lh + i as f32 * lh }, &layout, &fg);
             }
         }
         dc.pop_clip();
@@ -2896,6 +3089,13 @@ impl Kubide {
                 let sel = selected.map(|s| format!("  ({} selected)", s.chars().count())).unwrap_or_default();
                 parts.push(format!("Ln {}, Col {}{sel}", c.line + 1, c.col + 1));
             }
+        }
+        // Only when there is something to count: a permanent "0 errors"
+        // is a segment that says nothing on most days.
+        let (errors, warnings) = self.lsp.counts();
+        if errors + warnings > 0 {
+            let count = |n: usize, word: &str| format!("{n} {word}{}", if n == 1 { "" } else { "s" });
+            parts.push(format!("{}, {}", count(errors, "error"), count(warnings, "warning")));
         }
         if on.font {
             parts.push(format!("{} {:.0}px", self.text.family(), self.text.size()));

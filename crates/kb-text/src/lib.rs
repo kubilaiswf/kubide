@@ -35,6 +35,18 @@ pub const DEFAULT_FONTS: &[&str] = &[
     "Consolas",
 ];
 
+/// How a run is set: the face's weight and slant. The size and the family
+/// belong to the engine; this is the part a theme decides per syntax role.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+pub struct FontStyle {
+    pub bold: bool,
+    pub italic: bool,
+}
+
+impl FontStyle {
+    pub const REGULAR: FontStyle = FontStyle { bold: false, italic: false };
+}
+
 /// Why the text engine could not do something. Carried as a sentence: the
 /// status bar is the only place these are ever read.
 #[derive(Clone, Debug, PartialEq, Eq)]

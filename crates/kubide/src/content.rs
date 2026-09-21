@@ -81,6 +81,10 @@ pub struct Settings {
     /// What the last save did. Cleared by the next change, so it can never
     /// claim a file matches a screen it no longer matches.
     pub status: Option<String>,
+    /// A value was stepped and the file has not heard about it. Leaving the
+    /// screen writes it then: a change that looked applied and was gone after
+    /// the next restart read as the editor forgetting, not as an unsaved file.
+    pub unsaved: bool,
     /// Whatever the pane held before this took it over.
     ///
     /// Held rather than dropped so leaving puts the file back. Closing the
@@ -94,7 +98,7 @@ pub struct Settings {
 
 impl Settings {
     pub fn new(previous: Option<Box<Content>>) -> Self {
-        Self { selected: 0, top: 0, status: None, previous, selection_seen: None }
+        Self { selected: 0, top: 0, status: None, unsaved: false, previous, selection_seen: None }
     }
 
     /// Gives back what the pane held before. `None` when it was empty.
@@ -291,6 +295,10 @@ impl Editor {
         }
         self.highlights = syntax.highlight(lang, &self.buffer.to_text());
         self.highlighted_at = Some(self.buffer.revision());
+    }
+
+    pub fn lang(&self) -> Option<kb_syn::Lang> {
+        self.lang
     }
 
     /// Spans for one line, empty when there is no highlighting for it.

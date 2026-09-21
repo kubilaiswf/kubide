@@ -18,7 +18,9 @@ pub mod watch;
 pub use color::Color;
 pub use keys::{Action, Chord, Keymap, Scope};
 pub use settings::Setting;
-pub use theme::{Ansi, Caption, GitColors, SyntaxColors, TerminalColors, Theme};
+pub use theme::{
+    Ansi, Caption, EditorColors, GitColors, SyntaxColors, SyntaxStyles, TerminalColors, TextStyle, Theme,
+};
 pub use watch::Watcher;
 
 use serde::{Deserialize, Serialize};
@@ -44,8 +46,47 @@ pub struct Config {
     pub cursor: Cursor,
     pub vim: Vim,
     pub agent: Agent,
+    pub lsp: Lsp,
     /// Chord to action. Merges over the defaults rather than replacing them.
     pub keys: Keymap,
+}
+
+/// Language servers: which program understands which language.
+///
+/// A language is named the way the protocol names it (`rust`, `python`,
+/// `typescript`), and its value is the command line. A server that is not
+/// installed is simply not started — the editor is the same editor without
+/// it — so the defaults can list the usual ones without asking anyone to
+/// install them.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Lsp {
+    pub enabled: bool,
+    /// Runs the server's formatter on save.
+    pub format_on_save: bool,
+    pub servers: std::collections::BTreeMap<String, Vec<String>>,
+}
+
+impl Default for Lsp {
+    fn default() -> Self {
+        let server = |lang: &str, cmd: &[&str]| (lang.to_string(), cmd.iter().map(|s| s.to_string()).collect());
+        Self {
+            enabled: true,
+            format_on_save: false,
+            servers: [
+                server("rust", &["rust-analyzer"]),
+                server("python", &["pyright-langserver", "--stdio"]),
+                server("go", &["gopls"]),
+                server("c", &["clangd"]),
+                server("cpp", &["clangd"]),
+                server("typescript", &["typescript-language-server", "--stdio"]),
+                server("typescriptreact", &["typescript-language-server", "--stdio"]),
+                server("javascript", &["typescript-language-server", "--stdio"]),
+            ]
+            .into_iter()
+            .collect(),
+        }
+    }
 }
 
 /// The agent pane: how Claude Code is started.
@@ -216,6 +257,10 @@ impl Default for Vim {
 #[serde(default, deny_unknown_fields)]
 pub struct Window {
     pub backdrop: Backdrop,
+    /// How opaque the window's ground is, 0.0 to 1.0. Unset keeps the
+    /// material's own alpha, or the theme background's. On Windows, unset
+    /// also means DWM's material is left untouched under a clear frame.
+    pub opacity: Option<f32>,
     /// Title bar height in DIPs.
     pub caption_height: f32,
     /// Gap between the window edge and the pane area.
@@ -256,10 +301,42 @@ pub struct Terminal {
     pub scrollback: usize,
 }
 
+impl Backdrop {
+    /// The tint's alpha when `[window] opacity` leaves it alone. One table
+    /// for the renderer and the settings screen, so the screen shows the
+    /// number actually being painted.
+    pub fn default_opacity(self) -> f32 {
+        match self {
+            Backdrop::None => 1.0,
+            Backdrop::Mica | Backdrop::MicaAlt => 0.94,
+            Backdrop::Acrylic => 0.78,
+        }
+    }
+}
+
+impl Backdrop {
+    /// The grey each material is tinted with where we paint it ourselves.
+    pub fn grey(self) -> u8 {
+        match self {
+            Backdrop::None => 0x1e,
+            Backdrop::Mica => 0x20,
+            Backdrop::MicaAlt => 0x0c,
+            Backdrop::Acrylic => 0x2a,
+        }
+    }
+}
+
+impl Window {
+    pub fn opacity_or_default(&self) -> f32 {
+        self.opacity.unwrap_or_else(|| self.backdrop.default_opacity()).clamp(0.0, 1.0)
+    }
+}
+
 impl Default for Window {
     fn default() -> Self {
         Self {
             backdrop: Backdrop::Acrylic,
+            opacity: None,
             caption_height: 40.0,
             padding: 14.0,
         }
@@ -588,6 +665,12 @@ pub fn load_workspace(root: &Path) -> Loaded {
             if t.remove("agent").is_some() {
                 note(Some(".kubide: [agent] is ignored here — agent settings come from your own config".into()));
             }
+            // The same for language servers: `[lsp] servers` is a command
+            // line, and a clone that could set one would be a clone that
+            // runs a program of its choosing the moment a file is opened.
+            if t.remove("lsp").is_some() {
+                note(Some(".kubide: [lsp] is ignored here — language servers come from your own config".into()));
+            }
             merge(&mut table, t);
             workspace_path = Some(ws_path);
         }
@@ -739,6 +822,7 @@ pub const BUILTIN_THEMES: &[(&str, &str)] = &[
     ("aurora", include_str!("../themes/aurora.toml")),
     ("evergreen", include_str!("../themes/evergreen.toml")),
     ("paper", include_str!("../themes/paper.toml")),
+    ("espresso", include_str!("../themes/espresso.toml")),
 ];
 
 /// `themes` beside the config file, so `KUBIDE_CONFIG` moves both at once.
@@ -761,10 +845,31 @@ pub fn seed_themes() {
     }
     for (name, text) in BUILTIN_THEMES {
         let path = dir.join(format!("{name}.toml"));
-        if !path.exists() {
-            let _ = std::fs::write(path, text);
+        match std::fs::read_to_string(&path) {
+            Err(_) => {
+                let _ = std::fs::write(path, text);
+            }
+            // An older seed, never edited: every line of it is still in the
+            // built-in, in order, and the built-in has only gained lines
+            // since. Still ours, so it follows. One edited line breaks the
+            // match and the file stays exactly as it is, which is the point.
+            Ok(on_disk) if on_disk != *text && is_older_seed(&on_disk, text) => {
+                let _ = std::fs::write(path, text);
+            }
+            Ok(_) => {}
         }
     }
+}
+
+/// Whether `on_disk` is `builtin` with lines missing and nothing else
+/// different. Line endings aside: git's autocrlf decides what a Windows
+/// checkout embeds, and that is not an edit.
+fn is_older_seed(on_disk: &str, builtin: &str) -> bool {
+    let mut rest = builtin.lines().map(str::trim_end);
+    on_disk
+        .lines()
+        .map(str::trim_end)
+        .all(|line| rest.any(|b| b == line))
 }
 
 /// Every theme that can be named right now: "default" first, then the
@@ -813,6 +918,56 @@ pub(crate) fn resolve_theme_in(dir: &Path, name: &str) -> Result<(Theme, Option<
         "theme '{name}' not found — expected {}",
         file.display()
     ))
+}
+
+/// Writes `theme` out as a new file in `dir` and returns where.
+///
+/// Every colour is written, not only what differs from the default: this
+/// file exists to be edited, and a role that is not in it is a role nobody
+/// finds. Refuses an existing name rather than overwrite someone's theme.
+pub fn write_theme_in(dir: &Path, name: &str, theme: &Theme, from: &str) -> Result<PathBuf, String> {
+    let name = name.trim();
+    let plain = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
+    if name.is_empty() || !name.chars().all(plain) {
+        return Err("a theme name is letters, digits, - and _".into());
+    }
+    if name == "default" {
+        return Err("'default' is the built-in look; pick another name".into());
+    }
+    let path = dir.join(format!("{name}.toml"));
+    if path.exists() || BUILTIN_THEMES.iter().any(|(n, _)| *n == name) {
+        return Err(format!("a theme called '{name}' already exists"));
+    }
+    let body = toml::to_string_pretty(theme).map_err(|e| e.to_string())?;
+    let text = format!(
+        "# {name} for kubide, started from {from}.\n#\n\
+         # Saved changes show at once while this theme is the active one.\n\
+         # Colours are \"#rrggbb\", or \"#rrggbbaa\" with transparency. Left out of\n\
+         # a fresh copy because they are unset: `background` at the top (the\n\
+         # window's own colour), and under [editor] `selection`, `current_line`,\n\
+         # `line_number`, `line_number_active`, `caret`, `search`, `bracket`.\n\
+         # [style] takes \"bold\", \"italic\", \"bold italic\" or \"normal\" per role.\n\n{body}"
+    );
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    std::fs::write(&path, text).map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
+/// [`write_theme_in`] the themes folder.
+pub fn write_theme(name: &str, theme: &Theme, from: &str) -> Result<PathBuf, String> {
+    write_theme_in(&themes_dir(), name, theme, from)
+}
+
+/// The file behind a named theme, written out from the built-in first when
+/// the folder has lost it — there is nothing to edit otherwise.
+pub fn theme_file(name: &str) -> Option<PathBuf> {
+    let path = themes_dir().join(format!("{name}.toml"));
+    if !path.exists() {
+        let (_, text) = BUILTIN_THEMES.iter().find(|(n, _)| *n == name)?;
+        std::fs::create_dir_all(themes_dir()).ok()?;
+        std::fs::write(&path, text).ok()?;
+    }
+    Some(path)
 }
 
 // ---------------------------------------------------------------------------
@@ -1056,6 +1211,18 @@ mod tests {
     }
 
     #[test]
+    fn a_workspace_cannot_choose_what_runs_as_a_language_server() {
+        let root = std::env::temp_dir().join("kubide-ws-lsp");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".kubide")).unwrap();
+        std::fs::write(workspace_config_path(&root), "[lsp.servers]\nrust = [\"./pwn.sh\"]\n").unwrap();
+
+        let loaded = load_workspace(&root);
+        assert_eq!(loaded.config.lsp, Lsp::default());
+        assert!(loaded.problem.as_deref().is_some_and(|p| p.contains("[lsp]")), "{:?}", loaded.problem);
+    }
+
+    #[test]
     fn seeding_a_workspace_marks_but_never_resets() {
         let root = std::env::temp_dir().join("kubide-ws-seed");
         let _ = std::fs::remove_dir_all(&root);
@@ -1153,5 +1320,36 @@ mod tests {
         let _ = std::fs::remove_dir_all(&empty);
         c.theme = resolve_theme_in(&empty, "gruvbox").unwrap().0;
         c
+    }
+}
+
+#[cfg(test)]
+mod seed_tests {
+    use super::{is_older_seed, resolve_theme_in, write_theme_in, Color, Theme};
+
+    #[test]
+    fn a_written_theme_reads_back_the_same() {
+        let dir = std::env::temp_dir().join("kubide-write-theme");
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut theme = Theme { background: Some(Color::rgb(0x1f, 0x18, 0x13)), ..Theme::default() };
+        theme.style.keyword.bold = true;
+
+        let path = write_theme_in(&dir, "mine", &theme, "default").unwrap();
+        assert_eq!(resolve_theme_in(&dir, "mine").unwrap(), (theme, Some(path)));
+        // Never over an existing theme, the user's or a built-in.
+        assert!(write_theme_in(&dir, "mine", &theme, "default").is_err());
+        assert!(write_theme_in(&dir, "gruvbox", &theme, "default").is_err());
+        assert!(write_theme_in(&dir, "../up", &theme, "default").is_err());
+    }
+
+    #[test]
+    fn a_seed_missing_newer_lines_is_still_ours() {
+        let builtin = "background = \"#000\"\nfg = \"#fff\"\n\n[style]\nkeyword = \"bold\"\n";
+        assert!(is_older_seed("fg = \"#fff\"\n", builtin));
+        assert!(is_older_seed("fg = \"#fff\"\r\n", builtin));
+        // One changed colour and it is the user's file.
+        assert!(!is_older_seed("fg = \"#eee\"\n", builtin));
+        // So is a reordering.
+        assert!(!is_older_seed("fg = \"#fff\"\nbackground = \"#000\"\n", builtin));
     }
 }

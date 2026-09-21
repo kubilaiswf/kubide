@@ -3,6 +3,7 @@
 # Copy, recolour, save as mytheme.toml, set `theme = "mytheme"` in
 # config.toml. Anything left out keeps kubide's default.
 
+background = "#191724e6" # the window itself; the alpha is how much desktop stays
 fg = "#e0def4"
 dim = "#908caa"
 accent = "#c4a7e7"

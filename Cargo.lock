@@ -831,6 +831,13 @@ name = "kb-git"
 version = "0.1.0"
 
 [[package]]
+name = "kb-lsp"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "kb-syn"
 version = "0.1.0"
 dependencies = [
@@ -921,6 +928,7 @@ dependencies = [
  "kb-fs",
  "kb-gfx",
  "kb-git",
+ "kb-lsp",
  "kb-syn",
  "kb-term",
  "kb-text",

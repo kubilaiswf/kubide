@@ -28,6 +28,12 @@ pub enum Action {
     OpenExplorer,
     ToggleExplorer,
     OpenSettings,
+    /// Copies the colours on screen into a new theme file, makes it the
+    /// active theme and opens it — the file is watched, so every save
+    /// recolours the window it is being edited in.
+    NewTheme,
+    /// Opens the active theme's file.
+    EditTheme,
     ToggleHelp,
     NewFile,
     NewFolder,
@@ -83,13 +89,26 @@ pub enum Action {
     /// list" from the list is a joke, not a feature.
     Commands,
     GoToFile,
+    /// Asked of the language server. Each says so when the file's language
+    /// has none running, rather than silently doing nothing.
+    GoToDefinition,
+    Hover,
+    Format,
+    Complete,
     /// Swaps the focused pane back to the file it held most recently — the
     /// alt-tab of files. The editor has no tabs on purpose, and this is the
     /// piece of tabs actually worth having.
     LastFile,
+    /// The files this window has shown, most recent first, in the same
+    /// picker Go to file uses. Ctrl+Tab reaches one file back; this reaches
+    /// all of them, which is what a row of tabs was ever for.
+    RecentFiles,
     Find,
     Replace,
     FindInProject,
+    /// Replace across every file the project search reaches. Asks first,
+    /// with the counts: it writes to disk, and no single undo covers it.
+    ReplaceInProject,
     GoToLine,
     /// The git panel: stage, commit, read diffs and the log.
     GitPanel,
@@ -144,6 +163,8 @@ impl Action {
         Action::OpenExplorer,
         Action::ToggleExplorer,
         Action::OpenSettings,
+        Action::NewTheme,
+        Action::EditTheme,
         Action::ToggleHelp,
         Action::NewFile,
         Action::NewFolder,
@@ -178,9 +199,15 @@ impl Action {
         Action::SelectLine,
         Action::GoToBracket,
         Action::GoToFile,
+        Action::GoToDefinition,
+        Action::Hover,
+        Action::Format,
+        Action::Complete,
         Action::LastFile,
+        Action::RecentFiles,
         Action::Find,
         Action::Replace,
+        Action::ReplaceInProject,
         Action::FindInProject,
         Action::GoToLine,
         Action::GitPanel,
@@ -213,6 +240,8 @@ impl Action {
             OpenExplorer => "Open file tree",
             ToggleExplorer => "Toggle file tree",
             OpenSettings => "Settings",
+            NewTheme => "New theme from the current colours",
+            EditTheme => "Edit the current theme",
             ToggleHelp => "Shortcut list on or off",
             NewFile => "New file",
             NewFolder => "New folder",
@@ -248,9 +277,15 @@ impl Action {
             GoToBracket => "Go to matching bracket",
             Commands => "Show all commands",
             GoToFile => "Go to file",
+            GoToDefinition => "Go to definition",
+            Hover => "Show type and documentation",
+            Format => "Format the file",
+            Complete => "Complete the word",
             LastFile => "Switch to last file",
+            RecentFiles => "Switch between recent files",
             Find => "Find in file",
             Replace => "Replace in file",
+            ReplaceInProject => "Replace in project",
             FindInProject => "Find in project",
             GoToLine => "Go to line",
             GitPanel => "Git: status and commit",
@@ -644,6 +679,10 @@ impl Default for Keymap {
             ("ctrl+minus", FontSmaller),
             ("ctrl+numpadminus", FontSmaller),
             ("ctrl+p", GoToFile),
+            ("f12", GoToDefinition),
+            ("ctrl+k", Hover),
+            ("alt+shift+f", Format),
+            ("ctrl+space", Complete),
             ("ctrl+shift+p", Commands),
             // The oldest "open" there is. A shell's Ctrl+O is obscure enough
             // to lose — Ctrl+W already set that precedent for close.
@@ -653,8 +692,10 @@ impl Default for Keymap {
             // The alt-tab of files. Tab is portable and Ctrl+Tab produces no
             // character, so no layout and no shell loses anything to it.
             ("ctrl+tab", LastFile),
+            ("ctrl+shift+tab", RecentFiles),
             ("ctrl+f", Find),
             ("ctrl+h", Replace),
+            ("ctrl+shift+h", ReplaceInProject),
             ("ctrl+shift+f", FindInProject),
             ("ctrl+g", GoToLine),
             // The shifted pair of go-to-line, and the letter is the point.

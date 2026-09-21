@@ -34,6 +34,25 @@ Working notes. Roughly ordered by how much they'd change day-to-day use.
   Lua, Ruby, PHP — add a grammar crate and two match arms when one is
   actually missed.
 
+## Language servers
+
+**They exist** (`[lsp]`, `kb-lsp`): errors and warnings underlined as you
+type with the caret line's message in the pane header and the totals in the
+status bar, go to definition (F12), hover (Ctrl+K), completion (Ctrl+Space)
+and formatting (Alt+Shift+F, or on save). One process per language, started
+with the first file of that language; a server that is not installed is
+just not started.
+
+Still missing:
+
+- **Completion is a picker, not a popup.** Ctrl+Space opens the overlay
+  narrowed to the word so far. Nothing appears on its own while typing.
+- **Rename, references, code actions, signature help, inlay hints.**
+- **Whole-document sync.** Deliberate; see the module comment in `kb-lsp`.
+- **No vim keys yet**: `gd` and `K` should reach definition and hover.
+- **Windows is type-checked, not run.** The client was written and tried on
+  Linux against rust-analyzer.
+
 ## Panes and files
 
 - **No tabs.** One pane holds one file. Opening a second file replaces the

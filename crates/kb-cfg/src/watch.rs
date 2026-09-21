@@ -43,9 +43,15 @@ impl Watcher {
         let mut debouncer = new_debouncer(DEBOUNCE, None, move |res: DebounceEventResult| {
             let Ok(events) = res else { return };
             let hit = events.iter().any(|e| {
-                e.paths
-                    .iter()
-                    .any(|p| p.file_name() == file.as_ref().map(|f| f.as_os_str()))
+                // inotify also reports opens and closes, and the reload
+                // reads the file: counted, every reload would trigger the
+                // next one, and each lap would throw away what the settings
+                // screen changed and had not written yet. Windows never
+                // reports a read, which is how this went unseen there.
+                !e.kind.is_access()
+                    && e.paths
+                        .iter()
+                        .any(|p| p.file_name() == file.as_ref().map(|f| f.as_os_str()))
             });
             if hit {
                 // A full channel means a reload is already pending.

@@ -215,12 +215,13 @@ impl Renderer {
         }
     }
 
-    /// Starts a frame and clears to fully transparent — DWM's material shows
-    /// through here.
-    pub fn begin(&mut self) -> crate::Result<Canvas> {
+    /// Starts a frame and clears to `tint`. Without one that is fully
+    /// transparent and DWM's material shows through untouched; with one the
+    /// material is what is left of it behind the tint's alpha.
+    pub fn begin(&mut self, tint: Option<Color>) -> crate::Result<Canvas> {
         unsafe {
             self.dc.BeginDraw();
-            self.dc.Clear(Some(&d2d(crate::rgba(0.0, 0.0, 0.0, 0.0))));
+            self.dc.Clear(Some(&d2d(tint.unwrap_or(crate::rgba(0.0, 0.0, 0.0, 0.0)))));
             // Translucent surface, so grayscale AA.
             self.dc.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
         }

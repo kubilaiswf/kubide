@@ -4,6 +4,7 @@
 # and two living greens on near-black forest ground. Text is candlelight
 # rather than white; white would be a flashlight.
 
+background = "#18230fe6" # the window itself; the alpha is how much desktop stays
 fg = "#e4e8d8"        # main text
 dim = "#8ba184"       # labels, hints, line numbers
 accent = "#3fae74"    # focus, selection, highlights — the palette's bright green, lifted

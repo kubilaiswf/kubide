@@ -27,6 +27,9 @@ kubide                                  # opens the project the shell is in
   Wayland needs nothing extra.
 - Settings, themes, snippets and sessions live in `~/.config/kubide`. Copy
   `config.example.toml` there as `config.toml` to start.
+- For a launcher entry, copy `dist/kubide.desktop` to
+  `~/.local/share/applications/`. The window's app id is `kubide`, which is
+  also the name to use in a compositor rule.
 - Blur behind the window is the compositor's job: Hyprland and KWin blur
   windows with alpha when configured to, GNOME draws them plain.
 

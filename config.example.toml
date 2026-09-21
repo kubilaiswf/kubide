@@ -45,6 +45,12 @@
 # windows with alpha, GNOME does not.
 backdrop = "acrylic"
 
+# How opaque the window's ground is, 0.0 to 1.0; 1.0 is fully matte. Unset
+# keeps the material's own (acrylic 0.78, mica 0.94), or the alpha of the
+# theme's `background`. On Windows, setting it paints that tint over DWM's
+# material; unset leaves the material untouched.
+# opacity = 1.0
+
 # Height of the draggable title strip, and the gap around the pane area.
 caption_height = 40.0
 padding = 14.0
@@ -158,6 +164,26 @@ smartcase = false
 # than vim's, because the highlight is the only way to see what n will do.
 hlsearch = true
 
+# Language servers: errors as you type, go to definition, hover, completion
+# and formatting, from each language's own server. One that is not installed
+# is just not started. The name is the protocol's language id, the value the
+# command line. Only read from this file, never from a project's .kubide —
+# a clone must not get to pick a program to run.
+[lsp]
+enabled = true
+# Run the server's formatter every time a file is saved.
+format_on_save = false
+
+[lsp.servers]
+c = ["clangd"]
+cpp = ["clangd"]
+go = ["gopls"]
+javascript = ["typescript-language-server", "--stdio"]
+python = ["pyright-langserver", "--stdio"]
+rust = ["rust-analyzer"]
+typescript = ["typescript-language-server", "--stdio"]
+typescriptreact = ["typescript-language-server", "--stdio"]
+
 # The agent pane: Claude Code, driven inside a pane. It is the `claude` CLI
 # itself — install and log in to that first — so CLAUDE.md, skills, MCP
 # servers and hooks all apply exactly as they do in the terminal.
@@ -239,10 +265,10 @@ auto_advance = false
 #
 # Actions: split-right, split-down, close-pane, open-terminal, open-explorer,
 # toggle-explorer, new-file, new-folder, rename, delete, focus-left, focus-right, focus-up, focus-down, copy, paste,
-# cut, save, undo, redo, select-all, select-line, go-to-bracket, commands, go-to-file, find, go-to-line,
+# cut, save, undo, redo, select-all, select-line, go-to-bracket, commands, go-to-file, last-file, recent-files, find, replace, replace-in-project, go-to-line,
 # find-in-project, toggle-comment, move-line-up, move-line-down, duplicate-line, delete-line, font-larger,
 # pomodoro-toggle, pomodoro-reset, pomodoro-skip, font-larger, font-smaller,
-# toggle-vim, quit.
+# toggle-vim, new-theme, edit-theme, go-to-definition, hover, format, complete, quit.
 #
 # Note on layouts: letters and digits have the same virtual-key code on every
 # keyboard layout, the OEM keys do not. That's why split is bound to Ctrl+2/3
@@ -348,6 +374,10 @@ auto_advance = false
 # change; everything else keeps its default.
 
 [theme]
+# What the window is painted on. Unset keeps the backdrop's own grey (and on
+# Windows leaves DWM's material alone). "#rrggbbaa": the alpha is how much of
+# what is behind stays visible; `[window] opacity` overrides it when set.
+# background = "#1f1813f2"
 fg = "#edebe6"
 dim = "#ada8a3"          # pane labels, status bar
 accent = "#8cb8f2"       # focus stripe
@@ -364,6 +394,17 @@ press = "#ffffff0d"
 close_hover = "#e64047d9"
 close_press = "#bf333ae6"
 
+# The editor's own marks. All optional: left out, each is mixed from accent,
+# dim and warning. A colour written here is used as is, alpha included.
+[theme.editor]
+# selection = "#8cb8f247"
+# current_line = "#ffffff0a"      # not drawn at all unless set
+# line_number = "#ada8a3"
+# line_number_active = "#edebe6"
+# caret = "#ccd9f2"
+# search = "#f2cc7338"
+# bracket = "#8cb8f24d"
+
 # Syntax roles. tree-sitter capture names fall back onto these, so
 # keyword.control.return still lands on "keyword".
 [theme.syntax]
@@ -379,6 +420,12 @@ punctuation = "#9b9792"
 variable = "#edebe6"
 property = "#93c9d8"
 attribute = "#d6b27a"
+
+# Weight and slant per syntax role: "bold", "italic", "bold italic" or
+# "normal". Same role names as the syntax table; anything left out is normal.
+[theme.style]
+# keyword = "bold"
+# comment = "italic"
 
 # File status in the explorer.
 [theme.git]
