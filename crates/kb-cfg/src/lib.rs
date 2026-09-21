@@ -239,6 +239,9 @@ pub struct Vim {
     /// vim mode. Off, the table always wins and vim only gets the chords it
     /// leaves unbound.
     pub ctrl_keys: bool,
+    /// Whether the Save shortcut still saves in a vim editor. Off, only
+    /// `:w` and friends write the file; the palette's Save always works.
+    pub save_key: bool,
     /// The unnamed register is the system clipboard, so `y` copies and `p`
     /// pastes what other programs see. Vim's `clipboard=unnamedplus`.
     pub clipboard: bool,
@@ -249,7 +252,7 @@ pub struct Vim {
 
 impl Default for Vim {
     fn default() -> Self {
-        Self { enabled: false, ctrl_keys: true, clipboard: false, ignorecase: false, smartcase: false, hlsearch: true }
+        Self { enabled: false, ctrl_keys: true, save_key: false, clipboard: false, ignorecase: false, smartcase: false, hlsearch: true }
     }
 }
 

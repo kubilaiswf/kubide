@@ -152,6 +152,9 @@ enabled = false
 # Ctrl+W, Ctrl+U, Ctrl+O, Ctrl+R, Ctrl+T/D do. Off, the table always wins
 # and vim only gets the chords it leaves unbound.
 ctrl_keys = true
+# Whether the Save shortcut (Ctrl+S) still saves in a vim editor. Off, only
+# :w :wq :x :wa write the file; the command palette's Save always works.
+save_key = false
 # `y` and `p` go through the system clipboard (vim's clipboard=unnamedplus).
 # Off, registers are vim's own and "+ or "* reach the clipboard on purpose.
 clipboard = false

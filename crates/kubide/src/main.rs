@@ -3948,6 +3948,10 @@ impl Handler for Kubide {
                     matches!(self.content.get(&self.focus), Some(Content::Explorer(_)))
                 }
             };
+            // A vim editor saves with `:w` unless the config says otherwise.
+            if action == kb_cfg::Action::Save && !self.cfg.vim.save_key && self.focused_vim().is_some() {
+                return true;
+            }
             if applies {
                 return self.run(action);
             }
