@@ -419,8 +419,8 @@ pub const PANE_KEYS: [(kb_cfg::Action, &str); 2] = [
 /// big editors, reduced to what this one believes in. Opening a workspace
 /// from here replaces it; it is a hallway, not a room.
 pub struct Welcome {
-    /// `(label, directory)` — the folder kubide was started in first, so
-    /// Enter always has an answer, then the remembered workspaces.
+    /// `(label, directory)` — the remembered workspaces, newest first,
+    /// then the folder kubide was started in.
     pub rows: Vec<(String, PathBuf)>,
     pub selected: usize,
 }
@@ -430,16 +430,23 @@ impl Welcome {
         // Labelled as one list, the current folder included: two projects both
         // called `release` are a coin toss, and the row that says which is
         // which has to come from looking at all of them at once.
-        let paths: Vec<PathBuf> = std::iter::once(cwd.to_path_buf())
-            .chain(recents.into_iter().filter(|p| p != cwd))
-            .collect();
+        let mut paths = recents;
+        if !paths.iter().any(|p| p == cwd) {
+            paths.push(cwd.to_path_buf());
+        }
         let labels = kb_fs::distinct_labels(&paths);
         let rows = labels
             .into_iter()
             .zip(paths)
             .enumerate()
             .map(|(i, (label, path))| {
-                let label = if i == 0 { format!("{label} (this folder)") } else { label };
+                let label = if path == cwd {
+                    format!("{label} (this folder)")
+                } else if i == 0 {
+                    format!("{label} (recent)")
+                } else {
+                    label
+                };
                 (label, path)
             })
             .collect();
@@ -910,6 +917,19 @@ mod tests {
             Content::Viewer(v) => assert!(v.note.is_some()),
             _ => panic!("a missing file must not open as an editor"),
         }
+    }
+
+    #[test]
+    fn the_welcome_screen_leads_with_the_last_workspace() {
+        let cwd = Path::new("/home/me");
+        let w = Welcome::new(cwd, vec![PathBuf::from("/w/last"), PathBuf::from("/w/older")]);
+        let labels: Vec<&str> = w.rows.iter().map(|(l, _)| l.as_str()).collect();
+        assert_eq!(labels, ["last (recent)", "older", "me (this folder)"]);
+        assert_eq!(w.chosen().as_deref(), Some(Path::new("/w/last")));
+
+        let w = Welcome::new(cwd, vec![cwd.to_path_buf(), PathBuf::from("/w/older")]);
+        assert_eq!(w.rows[0].0, "me (this folder)");
+        assert_eq!(w.rows.len(), 2);
     }
 
     #[test]
