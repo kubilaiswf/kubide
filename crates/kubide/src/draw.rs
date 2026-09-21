@@ -133,6 +133,7 @@ const CHEAT_SHEET: &[Cheat] = &[
     (kb_cfg::Action::OpenFolder, "", "Open folder"),
     (kb_cfg::Action::GoToFile, "", "Go to file"),
     (kb_cfg::Action::LastFile, "", "Switch to last file"),
+    (kb_cfg::Action::RecentFiles, "", "Recent files"),
     (kb_cfg::Action::Find, "", "Find in file"),
     (kb_cfg::Action::Replace, "", "Replace in file"),
     (kb_cfg::Action::FindInProject, "", "Find in project"),

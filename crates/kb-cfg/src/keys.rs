@@ -87,6 +87,10 @@ pub enum Action {
     /// alt-tab of files. The editor has no tabs on purpose, and this is the
     /// piece of tabs actually worth having.
     LastFile,
+    /// The files this window has shown, most recent first, in the same
+    /// picker Go to file uses. Ctrl+Tab reaches one file back; this reaches
+    /// all of them, which is what a row of tabs was ever for.
+    RecentFiles,
     Find,
     Replace,
     FindInProject,
@@ -179,6 +183,7 @@ impl Action {
         Action::GoToBracket,
         Action::GoToFile,
         Action::LastFile,
+        Action::RecentFiles,
         Action::Find,
         Action::Replace,
         Action::FindInProject,
@@ -249,6 +254,7 @@ impl Action {
             Commands => "Show all commands",
             GoToFile => "Go to file",
             LastFile => "Switch to last file",
+            RecentFiles => "Switch between recent files",
             Find => "Find in file",
             Replace => "Replace in file",
             FindInProject => "Find in project",
@@ -653,6 +659,7 @@ impl Default for Keymap {
             // The alt-tab of files. Tab is portable and Ctrl+Tab produces no
             // character, so no layout and no shell loses anything to it.
             ("ctrl+tab", LastFile),
+            ("ctrl+shift+tab", RecentFiles),
             ("ctrl+f", Find),
             ("ctrl+h", Replace),
             ("ctrl+shift+f", FindInProject),

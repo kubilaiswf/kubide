@@ -245,7 +245,7 @@ auto_advance = false
 #
 # Actions: split-right, split-down, close-pane, open-terminal, open-explorer,
 # toggle-explorer, new-file, new-folder, rename, delete, focus-left, focus-right, focus-up, focus-down, copy, paste,
-# cut, save, undo, redo, select-all, select-line, go-to-bracket, commands, go-to-file, find, go-to-line,
+# cut, save, undo, redo, select-all, select-line, go-to-bracket, commands, go-to-file, last-file, recent-files, find, go-to-line,
 # find-in-project, toggle-comment, move-line-up, move-line-down, duplicate-line, delete-line, font-larger,
 # pomodoro-toggle, pomodoro-reset, pomodoro-skip, font-larger, font-smaller,
 # toggle-vim, quit.

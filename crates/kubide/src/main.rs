@@ -1410,6 +1410,32 @@ impl Kubide {
         self.palette = Some(Palette::files(files, &base));
     }
 
+    /// The files this window has shown, in the file picker, newest first.
+    ///
+    /// The one on screen is left out — it is the one place there is no
+    /// point going — which also puts the previous file on the first row, so
+    /// the chord followed by Enter is Ctrl+Tab.
+    fn open_palette_recent(&mut self) {
+        let current = match self.content.get(&self.focus) {
+            Some(Content::Editor(e)) => e.buffer.path().map(Path::to_path_buf),
+            _ => None,
+        };
+        let files: Vec<PathBuf> = self
+            .recent
+            .iter()
+            .filter(|p| Some(p.as_path()) != current.as_deref() && p.exists())
+            .cloned()
+            .collect();
+        if files.is_empty() {
+            self.warn("no other files opened yet");
+            return;
+        }
+        let base = self.git.root().unwrap_or(&self.root).to_path_buf();
+        let mut palette = Palette::files(files, &base);
+        palette.label = Some("recent".into());
+        self.palette = Some(palette);
+    }
+
     /// A click while the overlay is open.
     ///
     /// Inside a row selects it, and a second click on the row already selected
@@ -3757,6 +3783,7 @@ impl Kubide {
             Commands => self.palette = Some(Palette::commands(&self.cfg.keys)),
             GoToFile => self.open_palette_files(),
             LastFile => self.open_last_file(),
+            RecentFiles => self.open_palette_recent(),
             Find => {
                 let lines = match self.content.get(&self.focus) {
                     Some(Content::Editor(e)) => e.buffer.lines().to_vec(),
