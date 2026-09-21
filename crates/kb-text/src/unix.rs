@@ -14,7 +14,7 @@ use cosmic_text::{
     Attrs, Buffer, FontSystem, LayoutGlyph, Metrics, Shaping, SwashCache, SwashContent, Wrap,
 };
 
-use crate::{Error, DEFAULT_FONTS};
+use crate::{Error, FontStyle, DEFAULT_FONTS};
 
 /// What is tried when nothing from the config is installed. Whatever the
 /// distribution ships as its monospace face comes after these, so a machine
@@ -147,6 +147,9 @@ pub struct TextEngine {
     /// Line text → shaped layout. Shaping is too expensive to redo every
     /// frame, and an editor draws the same lines over and over.
     cache: HashMap<String, Layout>,
+    /// The same, for runs that are not regular. Apart so the common case
+    /// keeps looking a `&str` up without building a key.
+    styled: HashMap<(FontStyle, String), Layout>,
 }
 
 impl TextEngine {
@@ -164,6 +167,7 @@ impl TextEngine {
             baseline: size,
             cell: (size * 0.6, size * 1.4),
             cache: HashMap::new(),
+            styled: HashMap::new(),
         };
         me.measure();
         Ok(me)
@@ -196,12 +200,22 @@ impl TextEngine {
     }
 
     fn shape(&self, text: &str) -> Shaped {
+        self.shape_styled(text, FontStyle::REGULAR)
+    }
+
+    fn shape_styled(&self, text: &str, style: FontStyle) -> Shaped {
         with_fonts(|fonts| {
             let mut buffer = Buffer::new_empty(Metrics::new(self.size, self.line_h.max(1.0)));
             buffer.set_wrap(Wrap::None);
             buffer.set_size(None, None);
             let mut attrs = Attrs::new();
             attrs.family = Family::Name(&self.family);
+            if style.bold {
+                attrs.weight = Weight::BOLD;
+            }
+            if style.italic {
+                attrs.style = Style::Italic;
+            }
             buffer.set_text(text, &attrs, Shaping::Advanced, None);
             buffer.shape_until_scroll(&mut fonts.system, false);
 
@@ -236,6 +250,23 @@ impl TextEngine {
         }
         let l = Layout(Rc::new(self.shape(text)));
         self.cache.insert(text.to_owned(), l.clone());
+        Ok(l)
+    }
+
+    /// [`Self::line`] in another weight or slant. A family without the face
+    /// gets whatever the font system synthesises or falls back to; the
+    /// advance stays a cell either way, because the grid is measured once
+    /// from the regular face and every run is placed by column.
+    pub fn line_styled(&mut self, text: &str, style: FontStyle) -> crate::Result<Layout> {
+        if style == FontStyle::REGULAR {
+            return self.line(text);
+        }
+        let key = (style, text.to_owned());
+        if let Some(l) = self.styled.get(&key) {
+            return Ok(l.clone());
+        }
+        let l = Layout(Rc::new(self.shape_styled(text, style)));
+        self.styled.insert(key, l.clone());
         Ok(l)
     }
 
@@ -275,6 +306,7 @@ impl TextEngine {
     pub fn set_size(&mut self, size: f32) -> crate::Result<()> {
         self.size = size.clamp(6.0, 72.0);
         self.cache.clear(); // layouts are bound to the old size
+        self.styled.clear();
         self.measure();
         Ok(())
     }
@@ -314,7 +346,7 @@ impl TextEngine {
         self.line_h
     }
     pub fn cached_lines(&self) -> usize {
-        self.cache.len()
+        self.cache.len() + self.styled.len()
     }
 }
 

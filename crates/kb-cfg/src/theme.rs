@@ -46,6 +46,68 @@ pub struct Theme {
     pub terminal: TerminalColors,
     pub git: GitColors,
     pub syntax: SyntaxColors,
+    /// Weight and slant per syntax role. Apart from `syntax` so that table
+    /// stays a list of colours — every theme written so far keeps parsing.
+    pub style: SyntaxStyles,
+}
+
+/// How a syntax role is set. Written as words — `"bold"`, `"italic"`,
+/// `"bold italic"`, `"normal"` — because a theme is edited by hand and two
+/// booleans per role would double the table for what is usually one word.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct TextStyle {
+    pub bold: bool,
+    pub italic: bool,
+}
+
+impl Serialize for TextStyle {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(match (self.bold, self.italic) {
+            (false, false) => "normal",
+            (true, false) => "bold",
+            (false, true) => "italic",
+            (true, true) => "bold italic",
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for TextStyle {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(d)?;
+        let mut style = TextStyle::default();
+        for word in text.split(|c: char| c.is_whitespace() || c == '-' || c == '+') {
+            match word.to_ascii_lowercase().as_str() {
+                "" | "normal" | "regular" => {}
+                "bold" => style.bold = true,
+                "italic" => style.italic = true,
+                other => {
+                    return Err(serde::de::Error::custom(format!(
+                        "unknown style {other:?}: use bold, italic, \"bold italic\" or normal"
+                    )))
+                }
+            }
+        }
+        Ok(style)
+    }
+}
+
+/// One [`TextStyle`] per syntax role, all regular by default.
+#[derive(Clone, Copy, PartialEq, Debug, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SyntaxStyles {
+    pub keyword: TextStyle,
+    pub function: TextStyle,
+    #[serde(rename = "type")]
+    pub type_: TextStyle,
+    pub string: TextStyle,
+    pub number: TextStyle,
+    pub comment: TextStyle,
+    pub constant: TextStyle,
+    pub operator: TextStyle,
+    pub punctuation: TextStyle,
+    pub variable: TextStyle,
+    pub property: TextStyle,
+    pub attribute: TextStyle,
 }
 
 /// The editor's own marks. Every one is optional: unset, each is mixed from
@@ -235,6 +297,7 @@ impl Default for Theme {
             terminal: TerminalColors::default(),
             git: GitColors::default(),
             syntax: SyntaxColors::default(),
+            style: SyntaxStyles::default(),
         }
     }
 }
@@ -307,6 +370,16 @@ mod tests {
         assert_eq!(t.accent, Color::rgb(0xff, 0, 0));
         assert_eq!(t.fg, Theme::default().fg);
         assert_eq!(t.terminal.ansi.red, Ansi::default().red);
+    }
+
+    #[test]
+    fn styles_are_words() {
+        let t: Theme = toml::from_str("[style]\nkeyword = \"bold\"\ncomment = \"bold italic\"").unwrap();
+        assert_eq!(t.style.keyword, TextStyle { bold: true, italic: false });
+        assert_eq!(t.style.comment, TextStyle { bold: true, italic: true });
+        assert_eq!(t.style.string, TextStyle::default());
+        let e = toml::from_str::<Theme>("[style]\nkeyword = \"wavy\"").unwrap_err();
+        assert!(e.to_string().contains("wavy"), "{e}");
     }
 
     #[test]

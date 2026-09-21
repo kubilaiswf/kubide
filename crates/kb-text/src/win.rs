@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use windows::core::*;
 use windows::Win32::Graphics::DirectWrite::*;
 
-use crate::DEFAULT_FONTS;
+use crate::{FontStyle, DEFAULT_FONTS};
 
 fn wide0(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -33,6 +33,9 @@ pub struct TextEngine {
     /// Line text → shaped layout. Shaping is too expensive to redo every
     /// frame, and an editor draws the same lines over and over.
     cache: HashMap<String, Layout>,
+    /// The same, for runs that are not regular. Apart so the common case
+    /// keeps looking a `&str` up without building a key.
+    styled: HashMap<(FontStyle, String), Layout>,
 }
 
 impl TextEngine {
@@ -54,6 +57,7 @@ impl TextEngine {
                 line_h: size * 1.4,
                 cell: (size * 0.6, size * 1.4),
                 cache: HashMap::new(),
+                styled: HashMap::new(),
             };
             me.measure_line_height();
             me.measure_cell();
@@ -108,6 +112,32 @@ impl TextEngine {
         }
         let l = Layout(self.layout_uncached(text)?);
         self.cache.insert(text.to_owned(), l.clone());
+        Ok(l)
+    }
+
+    /// [`Self::line`] in another weight or slant. Set on the layout rather
+    /// than through a second text format: DirectWrite picks the face, or
+    /// synthesises one, per range, and the whole run is the range.
+    pub fn line_styled(&mut self, text: &str, style: FontStyle) -> crate::Result<Layout> {
+        if style == FontStyle::REGULAR {
+            return self.line(text);
+        }
+        let key = (style, text.to_owned());
+        if let Some(l) = self.styled.get(&key) {
+            return Ok(l.clone());
+        }
+        let layout = self.layout_uncached(text)?;
+        let range = DWRITE_TEXT_RANGE { startPosition: 0, length: u32::MAX };
+        unsafe {
+            if style.bold {
+                layout.SetFontWeight(DWRITE_FONT_WEIGHT_BOLD, range)?;
+            }
+            if style.italic {
+                layout.SetFontStyle(DWRITE_FONT_STYLE_ITALIC, range)?;
+            }
+        }
+        let l = Layout(layout);
+        self.styled.insert(key, l.clone());
         Ok(l)
     }
 
@@ -167,6 +197,7 @@ impl TextEngine {
     fn rebuild_format(&mut self) -> crate::Result<()> {
         self.format = unsafe { make_format(&self.factory, &self.family, self.size)? };
         self.cache.clear(); // layouts are bound to the old format
+        self.styled.clear();
         self.measure_line_height();
         self.measure_cell();
         Ok(())
@@ -225,7 +256,7 @@ impl TextEngine {
         self.line_h
     }
     pub fn cached_lines(&self) -> usize {
-        self.cache.len()
+        self.cache.len() + self.styled.len()
     }
 }
 

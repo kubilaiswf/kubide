@@ -103,6 +103,25 @@ fn syntax_color(c: &kb_cfg::SyntaxColors, k: kb_syn::Kind) -> kb_cfg::Color {
     }
 }
 
+fn syntax_style(c: &kb_cfg::SyntaxStyles, k: kb_syn::Kind) -> kb_text::FontStyle {
+    use kb_syn::Kind::*;
+    let s = match k {
+        Keyword => c.keyword,
+        Function => c.function,
+        Type => c.type_,
+        String => c.string,
+        Number => c.number,
+        Comment => c.comment,
+        Constant => c.constant,
+        Operator => c.operator,
+        Punctuation => c.punctuation,
+        Variable => c.variable,
+        Property => c.property,
+        Attribute => c.attribute,
+    };
+    kb_text::FontStyle { bold: s.bold, italic: s.italic }
+}
+
 fn git_color(c: &kb_cfg::GitColors, s: kb_git::Status) -> kb_cfg::Color {
     match s {
         kb_git::Status::Modified => c.modified,
@@ -934,7 +953,8 @@ impl Kubide {
                                 syntax_color(&theme.syntax, span.kind),
                                 if focused { 1.0 } else { 0.62 },
                             ))?;
-                        let layout = self.text.line(&run)?;
+                        let layout =
+                            self.text.line_styled(&run, syntax_style(&theme.style, span.kind))?;
                         dc.text(
                             Point { x: text_x + (start - left) as f32 * cw, y },
                             &layout,

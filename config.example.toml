@@ -401,6 +401,12 @@ variable = "#edebe6"
 property = "#93c9d8"
 attribute = "#d6b27a"
 
+# Weight and slant per syntax role: "bold", "italic", "bold italic" or
+# "normal". Same role names as the syntax table; anything left out is normal.
+[theme.style]
+# keyword = "bold"
+# comment = "italic"
+
 # File status in the explorer.
 [theme.git]
 modified = "#e0b15c"

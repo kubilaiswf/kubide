@@ -73,3 +73,6 @@ punctuation = "#a89680"
 variable = "#dfd0b8"
 property = "#7daea3"
 attribute = "#e78a4e"
+
+[style]
+keyword = "bold"
