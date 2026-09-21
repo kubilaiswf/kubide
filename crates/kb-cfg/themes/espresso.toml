@@ -1,0 +1,68 @@
+# Espresso for kubide.
+#
+# Dark roast: a brown deep enough to stay brown rather than drift orange,
+# cream text, and gruvbox-material's accents, which were drawn for exactly
+# this kind of ground. The keyword red is what keeps `if` and `let` from
+# melting into the identifiers around them.
+
+background = "#1f1813f2" # the window itself; the alpha is how much desktop stays
+fg = "#dfd0b8"        # main text
+dim = "#a89680"       # labels, hints, line numbers
+accent = "#d8a657"    # focus, selection, highlights
+warning = "#e0b154"
+error = "#f2594b"
+divider = "#dfd0b81a" # pane hairline — mostly transparent on purpose
+overlay = "#17120ef2" # the command palette's backdrop
+
+[caption]
+fg = "#a89680"
+icon = "#dfd0b8"
+hover = "#ffffff17"
+press = "#ffffff0d"
+close_hover = "#ea6962d9"
+close_press = "#b8504ae6"
+
+[terminal]
+background = "#1f1813" # cells of exactly this colour stay transparent
+foreground = "#dfd0b8"
+cursor = "#dfd0b8bf"
+selection = "#45372c"
+
+[terminal.ansi]
+black = "#17120e"
+red = "#ea6962"
+green = "#a9b665"
+yellow = "#d8a657"
+blue = "#7daea3"
+magenta = "#d3869b"
+cyan = "#89b482"
+white = "#c8bca7"
+bright_black = "#6b5c50"
+bright_red = "#f2847e"
+bright_green = "#bccb7c"
+bright_yellow = "#e6bb74"
+bright_blue = "#96c4ba"
+bright_magenta = "#e0a0b2"
+bright_cyan = "#a3c99c"
+bright_white = "#efe5d3"
+
+[git]
+modified = "#d8a657"
+added = "#a9b665"
+deleted = "#ea6962"
+untracked = "#7daea3"
+conflicted = "#d3869b"
+
+[syntax]
+keyword = "#ea6962"
+function = "#89b482"
+type = "#d8a657"
+string = "#a9b665"
+number = "#d3869b"
+comment = "#85776b"
+constant = "#d3869b"
+operator = "#dfd0b8"
+punctuation = "#a89680"
+variable = "#dfd0b8"
+property = "#7daea3"
+attribute = "#e78a4e"

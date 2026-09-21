@@ -314,14 +314,13 @@ fn blend(dst: &mut PremultipliedColorU8, r: f32, g: f32, b: f32, a: f32) {
 /// for DWM's materials. The compositor may blur what is behind a window
 /// with alpha; the tint is ours either way, and it is what makes text on a
 /// bright wallpaper readable.
-fn material(b: kb_win::Backdrop, opacity: Option<f32>) -> tiny_skia::Color {
+fn material(b: kb_win::Backdrop) -> tiny_skia::Color {
     let (v, a) = match b {
         kb_win::Backdrop::None => (0x1e, 1.0),
         kb_win::Backdrop::Mica => (0x20, 0.94),
         kb_win::Backdrop::MicaAlt => (0x0c, 0.94),
         kb_win::Backdrop::Acrylic => (0x2a, 0.78),
     };
-    let a = opacity.map_or(a, |o| o.clamp(0.0, 1.0));
     tiny_skia::Color::from_rgba8(v, v, v, (a * 255.0) as u8)
 }
 
@@ -421,15 +420,19 @@ impl Renderer {
         Ok(())
     }
 
-    /// Starts a frame on the material colour — the stand-in for DWM's
-    /// backdrop showing through a cleared surface.
-    pub fn begin(&mut self) -> crate::Result<Canvas> {
+    /// Starts a frame on `tint`, or on the material colour without one —
+    /// the stand-in for DWM's backdrop showing through a cleared surface.
+    pub fn begin(&mut self, tint: Option<Color>) -> crate::Result<Canvas> {
         let (w, h) = (self.width, self.height);
         let mut pixmap = match self.pixmap.take() {
             Some(p) if p.width() == w && p.height() == h => p,
             _ => Pixmap::new(w, h).ok_or_else(|| Error(format!("no pixmap for {w}x{h}")))?,
         };
-        pixmap.fill(material(kb_win::current_backdrop(), kb_win::current_opacity()));
+        pixmap.fill(match tint {
+            Some(c) => tiny_skia::Color::from_rgba(c.r, c.g, c.b, c.a)
+                .unwrap_or_else(|| material(kb_win::current_backdrop())),
+            None => material(kb_win::current_backdrop()),
+        });
         Ok(Canvas { inner: RefCell::new(Inner { pixmap, clips: Vec::new(), mask: None }) })
     }
 

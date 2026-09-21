@@ -272,6 +272,18 @@ impl Backdrop {
     }
 }
 
+impl Backdrop {
+    /// The grey each material is tinted with where we paint it ourselves.
+    pub fn grey(self) -> u8 {
+        match self {
+            Backdrop::None => 0x1e,
+            Backdrop::Mica => 0x20,
+            Backdrop::MicaAlt => 0x0c,
+            Backdrop::Acrylic => 0x2a,
+        }
+    }
+}
+
 impl Window {
     pub fn opacity_or_default(&self) -> f32 {
         self.opacity.unwrap_or_else(|| self.backdrop.default_opacity()).clamp(0.0, 1.0)
@@ -762,6 +774,7 @@ pub const BUILTIN_THEMES: &[(&str, &str)] = &[
     ("aurora", include_str!("../themes/aurora.toml")),
     ("evergreen", include_str!("../themes/evergreen.toml")),
     ("paper", include_str!("../themes/paper.toml")),
+    ("espresso", include_str!("../themes/espresso.toml")),
 ];
 
 /// `themes` beside the config file, so `KUBIDE_CONFIG` moves both at once.
@@ -784,10 +797,29 @@ pub fn seed_themes() {
     }
     for (name, text) in BUILTIN_THEMES {
         let path = dir.join(format!("{name}.toml"));
-        if !path.exists() {
-            let _ = std::fs::write(path, text);
+        match std::fs::read_to_string(&path) {
+            Err(_) => {
+                let _ = std::fs::write(path, text);
+            }
+            // A seed from before themes had a `background`, never edited:
+            // still ours, so it follows the built-in. Anything else on disk
+            // has been touched and stays exactly as it is.
+            Ok(on_disk) if same_text(&on_disk, &without_background(text)) => {
+                let _ = std::fs::write(path, text);
+            }
+            Ok(_) => {}
         }
     }
+}
+
+fn without_background(text: &str) -> String {
+    text.lines().filter(|l| !l.starts_with("background = ")).collect::<Vec<_>>().join("\n")
+}
+
+/// Line endings aside: git's autocrlf decides what a Windows checkout
+/// embeds, and that is not an edit.
+fn same_text(a: &str, b: &str) -> bool {
+    a.lines().map(str::trim_end).eq(b.lines().map(str::trim_end))
 }
 
 /// Every theme that can be named right now: "default" first, then the
@@ -880,8 +912,7 @@ impl Config {
     pub fn refresh_from(&self, old: &Config) -> Refresh {
         Refresh {
             font: self.font != old.font,
-            window: self.window.backdrop != old.window.backdrop
-                || self.window.opacity != old.window.opacity,
+            window: self.window.backdrop != old.window.backdrop,
             layout: self.window.caption_height != old.window.caption_height
                 || self.window.padding != old.window.padding,
             terminal_next: self.terminal != old.terminal,

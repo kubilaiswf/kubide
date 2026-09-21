@@ -4,6 +4,7 @@
 # with a single vein of glowing mint. The darkest theme here: the
 # background gives nothing, so the mint reads like light.
 
+background = "#212121e6" # the window itself; the alpha is how much desktop stays
 fg = "#e8e8e8"        # main text
 dim = "#848d8c"       # labels, hints, line numbers
 accent = "#14ffec"    # focus, selection, highlights

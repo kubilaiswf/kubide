@@ -4,6 +4,7 @@
 # rose-bright, one hue deepening into itself. The greens and golds are
 # guests here, dressed to match.
 
+background = "#3a0519e6" # the window itself; the alpha is how much desktop stays
 fg = "#f5dce6"        # main text
 dim = "#b3798f"       # labels, hints, line numbers
 accent = "#ef88ad"    # focus, selection, highlights

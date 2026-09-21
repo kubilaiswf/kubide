@@ -4,6 +4,7 @@
 # 00ADB5 / EEEEEE): charcoal depths, one confident teal, and text that
 # stays out of the way.
 
+background = "#222831e6" # the window itself; the alpha is how much desktop stays
 fg = "#eeeeee"        # main text
 dim = "#8a929c"       # labels, hints, line numbers
 accent = "#00adb5"    # focus, selection, highlights

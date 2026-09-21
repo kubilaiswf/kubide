@@ -5,6 +5,7 @@
 # Anything you leave out keeps kubide's default — a theme can be one line.
 # Colours are "#rrggbb", or "#rrggbbaa" when they carry transparency.
 
+background = "#1d2021e6" # the window itself; the alpha is how much desktop stays
 fg = "#ebdbb2"        # main text
 dim = "#a89984"       # labels, hints, line numbers
 accent = "#83a598"    # focus, selection, highlights

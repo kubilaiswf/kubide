@@ -4,6 +4,7 @@
 # greens with worn leather and bone-white text. The warm brown does the
 # pointing; the greens just hold the room.
 
+background = "#2c3930e6" # the window itself; the alpha is how much desktop stays
 fg = "#dcd7c9"        # main text
 dim = "#8d9a90"       # labels, hints, line numbers
 accent = "#b58a68"    # focus, selection, highlights — the leather, brightened

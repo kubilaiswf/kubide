@@ -4,6 +4,7 @@
 # charcoals with sand where the neon would be. Warm, low-glare, nothing
 # fluorescent anywhere.
 
+background = "#222831e6" # the window itself; the alpha is how much desktop stays
 fg = "#dfd0b8"        # main text
 dim = "#948979"       # labels, hints, line numbers
 accent = "#c8b491"    # focus, selection, highlights — the sand, brightened

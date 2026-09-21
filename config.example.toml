@@ -45,9 +45,10 @@
 # windows with alpha, GNOME does not.
 backdrop = "acrylic"
 
-# How opaque that tint is, 0.0 to 1.0; 1.0 is fully matte. Unset keeps the
-# material's own (acrylic 0.78, mica 0.94). Linux only — on Windows DWM
-# decides.
+# How opaque the window's ground is, 0.0 to 1.0; 1.0 is fully matte. Unset
+# keeps the material's own (acrylic 0.78, mica 0.94), or the alpha of the
+# theme's `background`. On Windows, setting it paints that tint over DWM's
+# material; unset leaves the material untouched.
 # opacity = 1.0
 
 # Height of the draggable title strip, and the gap around the pane area.
@@ -353,6 +354,10 @@ auto_advance = false
 # change; everything else keeps its default.
 
 [theme]
+# What the window is painted on. Unset keeps the backdrop's own grey (and on
+# Windows leaves DWM's material alone). "#rrggbbaa": the alpha is how much of
+# what is behind stays visible; `[window] opacity` overrides it when set.
+# background = "#1f1813f2"
 fg = "#edebe6"
 dim = "#ada8a3"          # pane labels, status bar
 accent = "#8cb8f2"       # focus stripe

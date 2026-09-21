@@ -167,6 +167,30 @@ fn cell_bg(c: &kb_term::Cell, selection: kb_term::Rgb) -> kb_term::Rgb {
 }
 
 impl Kubide {
+    /// What the frame is cleared to: the theme's background, or the
+    /// material's grey, at the configured opacity.
+    ///
+    /// On Windows DWM paints the material, so with nothing configured the
+    /// frame stays clear and the material is left alone — a tint appears
+    /// only once the theme or the opacity asks for one. Linux has no
+    /// material behind the window, so there the tint always is one.
+    fn frame_tint(&self) -> Option<Color> {
+        let window = &self.cfg.window;
+        let background = self.cfg.theme.background;
+        if cfg!(windows) && background.is_none() && window.opacity.is_none() {
+            return None;
+        }
+        let grey = window.backdrop.grey();
+        let base = background.unwrap_or(kb_cfg::Color::rgb(grey, grey, grey));
+        let alpha = match (window.opacity, background) {
+            (Some(o), _) => o.clamp(0.0, 1.0),
+            (None, Some(bg)) => bg.f32s().3,
+            (None, None) => window.backdrop.default_opacity(),
+        };
+        let (r, g, b, _) = base.f32s();
+        Some(kb_gfx::rgba(r, g, b, alpha))
+    }
+
     pub(crate) fn render(&mut self, window: kb_win::Window, chrome: &Chrome) -> Result<()> {
         if self.gfx.is_none() {
             let (w, h) = kb_win::client_size(window);
@@ -181,7 +205,7 @@ impl Kubide {
             self.relayout(w, h);
         }
         // A frame that cannot start is not a reason to lose the renderer.
-        let dc = match gfx.begin() {
+        let dc = match gfx.begin(self.frame_tint()) {
             Ok(dc) => dc,
             Err(e) => {
                 self.gfx = Some(gfx);

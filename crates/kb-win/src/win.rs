@@ -503,9 +503,6 @@ pub fn apply_dwm(hwnd: HWND, backdrop: Backdrop) {
     }
 }
 
-/// DWM owns the material's opacity here; the setting is Linux's.
-pub fn set_opacity(_: HWND, _: Option<f32>) {}
-
 /// Changes the backdrop after creation, for config reload. Also updates the
 /// stored value, or the next WM_SETTINGCHANGE would revert it.
 pub fn set_backdrop(hwnd: HWND, backdrop: Backdrop) {

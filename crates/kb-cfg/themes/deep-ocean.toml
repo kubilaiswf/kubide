@@ -4,6 +4,7 @@
 # water at the bottom, sunlit blue at the top, everything in between a
 # depth of the same sea.
 
+background = "#1b262ce6" # the window itself; the alpha is how much desktop stays
 fg = "#dcecf7"        # main text, a touch lighter than the palette's sky
 dim = "#7da2bd"       # labels, hints, line numbers
 accent = "#3282b8"    # focus, selection, highlights

@@ -43,7 +43,6 @@ pub struct Window(());
 struct Shared {
     window: Arc<WinitWindow>,
     backdrop: Backdrop,
-    opacity: Option<f32>,
     caption_h: i32,
     /// The last un-maximised place, for `placement` while maximised —
     /// what `GetWindowPlacement` remembers on the other side.
@@ -68,11 +67,6 @@ pub fn winit_window() -> Option<Arc<WinitWindow>> {
 /// The material in force, for the renderer to paint under the frame.
 pub fn current_backdrop() -> Backdrop {
     with_shared(|s| s.backdrop).unwrap_or(Backdrop::Acrylic)
-}
-
-/// The tint's alpha from the config, when it sets one.
-pub fn current_opacity() -> Option<f32> {
-    with_shared(|s| s.opacity).flatten()
 }
 
 pub fn is_maximized() -> bool {
@@ -131,17 +125,6 @@ pub fn set_backdrop(_: Window, backdrop: Backdrop) {
     with_shared(|s| {
         if s.backdrop != backdrop {
             s.backdrop = backdrop;
-            s.window.request_redraw();
-        }
-    });
-}
-
-/// Changes the tint's alpha after creation. Painted by the renderer, like
-/// the backdrop itself.
-pub fn set_opacity(_: Window, opacity: Option<f32>) {
-    with_shared(|s| {
-        if s.opacity != opacity {
-            s.opacity = opacity;
             s.window.request_redraw();
         }
     });
@@ -650,7 +633,6 @@ impl ApplicationHandler for App {
         SHARED.set(Some(Shared {
             window: window.clone(),
             backdrop: self.config.backdrop,
-            opacity: self.config.opacity,
             caption_h: self.config.caption_h,
             restored: place.map(|p| Placement { maximized: false, ..p }),
             quit: false,

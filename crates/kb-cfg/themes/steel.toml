@@ -4,6 +4,7 @@
 # the same alloy, dark to pale. Deliberately quiet: the only loud things
 # on screen should be the diagnostics.
 
+background = "#27374de6" # the window itself; the alpha is how much desktop stays
 fg = "#dde6ed"        # main text
 dim = "#9db2bf"       # labels, hints, line numbers
 accent = "#7da7c4"    # focus, selection, highlights — the palette's mid-blues, brightened

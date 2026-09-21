@@ -4,6 +4,7 @@
 # harbor water and one strip of sand. Blue does the structure, sand does
 # the reading.
 
+background = "#1b3c53e6" # the window itself; the alpha is how much desktop stays
 fg = "#d2c1b6"        # main text
 dim = "#8ba3b5"       # labels, hints, line numbers
 accent = "#6f94ad"    # focus, selection, highlights — the palette's top blue, lifted

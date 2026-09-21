@@ -12,6 +12,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Theme {
+    /// What the window is painted on, under everything. Unset leaves the
+    /// backdrop material's own grey — and on Windows leaves DWM's material
+    /// untouched. Its alpha is how much of the material, or the desktop,
+    /// stays visible; `[window] opacity` overrides that alpha when set.
+    pub background: Option<Color>,
     pub fg: Color,
     /// Secondary text: pane labels, hints.
     pub dim: Color,
@@ -195,6 +200,7 @@ const fn c(r: u8, g: u8, b: u8) -> Color {
 impl Default for Theme {
     fn default() -> Self {
         Self {
+            background: None,
             fg: c(0xed, 0xeb, 0xe6),
             dim: c(0xad, 0xa8, 0xa3),
             accent: c(0x8c, 0xb8, 0xf2),

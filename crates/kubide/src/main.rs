@@ -529,7 +529,6 @@ impl Kubide {
         if let Some(window) = self.window {
             if refresh.window {
                 kb_win::set_backdrop(window, backdrop_of(self.cfg.window.backdrop));
-                kb_win::set_opacity(window, Some(self.cfg.window.opacity_or_default()));
             }
             if refresh.layout {
                 kb_win::set_caption_height(window, self.cfg.window.caption_height as i32);
@@ -4086,7 +4085,6 @@ fn main() -> Result<()> {
     let window = WindowConfig {
         title: title_for(&workspace.dir),
         backdrop: backdrop_of(app.cfg.window.backdrop),
-        opacity: Some(app.cfg.window.opacity_or_default()),
         caption_h: app.cfg.window.caption_height as i32,
         // Opened where it was closed. The default size stays as the answer
         // for a first run and for a place that no longer exists.
