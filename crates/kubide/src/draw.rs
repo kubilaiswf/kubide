@@ -1052,6 +1052,27 @@ impl Kubide {
             }
         }
 
+        // Vim's command line, at the foot of the pane it acts on. The status
+        // bar is the window's: with a terminal split underneath, `:w` typed
+        // there was half a screen away from the file it was about to write.
+        let cmdline = match self.content.get(&pane) {
+            Some(Content::Editor(e)) if vim_on && focused => e.vim.cmdline(),
+            _ => None,
+        };
+        if let Some(line) = cmdline {
+            let y = r.bottom() - lh - 3.0;
+            let strip = Bounds { left: r.x, top: y - 2.0, right: r.right(), bottom: r.bottom() };
+            let panel = dc.solid(overlay(theme.overlay))?;
+            dc.fill_rect(&strip, &panel);
+            let rule = dc.solid(themed(theme.accent, 0.45))?;
+            dc.fill_rect(&Bounds { bottom: strip.top + 1.0, ..strip }, &rule);
+            let layout = self.text.volatile(&line)?;
+            dc.text(Point { x: r.x + 10.0, y }, &layout, &fg);
+            let x = r.x + 10.0 + line.chars().count() as f32 * cw;
+            let caret = dc.solid(themed(theme.editor.caret.unwrap_or(theme.terminal.cursor), 1.0))?;
+            dc.fill_rect(&Bounds { left: x, top: y, right: x + 2.0, bottom: y + lh }, &caret);
+        }
+
         // What the server said about the thing under the caret, in a box
         // below it — or above, when below would run off the pane.
         if let Some(text) = hover.filter(|_| cursor.line >= top && cursor.line < top + visible) {
@@ -3057,13 +3078,10 @@ impl Kubide {
         let mut parts: Vec<String> = Vec::new();
 
         // Vim first, where vim puts it: the mode, the keys typed so far of
-        // an unfinished command, and the register a macro is going into. A
-        // command line being typed takes the whole bar, as in vim, because
-        // it is the one thing on it the user is looking at.
+        // an unfinished command, and the register a macro is going into. The
+        // command line itself is not here: it is drawn at the foot of the
+        // pane being commanded, see `draw_editor`.
         if let Some(v) = self.focused_vim() {
-            if let Some(line) = v.cmdline() {
-                return line;
-            }
             let mut mode = match v.mode() {
                 kb_vim::Mode::Normal => "NORMAL".to_string(),
                 m => format!("-- {} --", m.label()),
