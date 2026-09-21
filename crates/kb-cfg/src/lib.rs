@@ -46,8 +46,47 @@ pub struct Config {
     pub cursor: Cursor,
     pub vim: Vim,
     pub agent: Agent,
+    pub lsp: Lsp,
     /// Chord to action. Merges over the defaults rather than replacing them.
     pub keys: Keymap,
+}
+
+/// Language servers: which program understands which language.
+///
+/// A language is named the way the protocol names it (`rust`, `python`,
+/// `typescript`), and its value is the command line. A server that is not
+/// installed is simply not started — the editor is the same editor without
+/// it — so the defaults can list the usual ones without asking anyone to
+/// install them.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Lsp {
+    pub enabled: bool,
+    /// Runs the server's formatter on save.
+    pub format_on_save: bool,
+    pub servers: std::collections::BTreeMap<String, Vec<String>>,
+}
+
+impl Default for Lsp {
+    fn default() -> Self {
+        let server = |lang: &str, cmd: &[&str]| (lang.to_string(), cmd.iter().map(|s| s.to_string()).collect());
+        Self {
+            enabled: true,
+            format_on_save: false,
+            servers: [
+                server("rust", &["rust-analyzer"]),
+                server("python", &["pyright-langserver", "--stdio"]),
+                server("go", &["gopls"]),
+                server("c", &["clangd"]),
+                server("cpp", &["clangd"]),
+                server("typescript", &["typescript-language-server", "--stdio"]),
+                server("typescriptreact", &["typescript-language-server", "--stdio"]),
+                server("javascript", &["typescript-language-server", "--stdio"]),
+            ]
+            .into_iter()
+            .collect(),
+        }
+    }
 }
 
 /// The agent pane: how Claude Code is started.
@@ -625,6 +664,12 @@ pub fn load_workspace(root: &Path) -> Loaded {
             if t.remove("agent").is_some() {
                 note(Some(".kubide: [agent] is ignored here — agent settings come from your own config".into()));
             }
+            // The same for language servers: `[lsp] servers` is a command
+            // line, and a clone that could set one would be a clone that
+            // runs a program of its choosing the moment a file is opened.
+            if t.remove("lsp").is_some() {
+                note(Some(".kubide: [lsp] is ignored here — language servers come from your own config".into()));
+            }
             merge(&mut table, t);
             workspace_path = Some(ws_path);
         }
@@ -1162,6 +1207,18 @@ mod tests {
         assert_eq!(loaded.config.agent, Agent::default(), "the clone must not choose its own permissions");
         assert_eq!(loaded.config.font.size, 11.0, "the rest of the project file still applies");
         assert!(loaded.problem.as_deref().is_some_and(|p| p.contains("[agent]")), "{:?}", loaded.problem);
+    }
+
+    #[test]
+    fn a_workspace_cannot_choose_what_runs_as_a_language_server() {
+        let root = std::env::temp_dir().join("kubide-ws-lsp");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".kubide")).unwrap();
+        std::fs::write(workspace_config_path(&root), "[lsp.servers]\nrust = [\"./pwn.sh\"]\n").unwrap();
+
+        let loaded = load_workspace(&root);
+        assert_eq!(loaded.config.lsp, Lsp::default());
+        assert!(loaded.problem.as_deref().is_some_and(|p| p.contains("[lsp]")), "{:?}", loaded.problem);
     }
 
     #[test]

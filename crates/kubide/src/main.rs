@@ -12,6 +12,7 @@ mod agent;
 mod content;
 mod draw;
 mod folders;
+mod lsp;
 mod metrics;
 mod palette;
 mod pomodoro;
@@ -84,6 +85,19 @@ struct Kubide {
     /// walks back through. In-memory only: remembering it across runs would
     /// mean reopening files the machine may no longer have.
     recent: Vec<PathBuf>,
+    /// The language servers behind the open editors.
+    lsp: lsp::Servers,
+    /// What the server said about the thing under the caret, and the pane it
+    /// was asked from. Gone at the next key: it describes where the caret
+    /// was, and a box that stayed would describe somewhere else.
+    hover: Option<(PaneId, String)>,
+    /// A question put to a server, remembered until it answers: the request
+    /// id, the file it was about and that file's revision then. An answer
+    /// about text that has since changed is dropped, not applied.
+    lsp_asked: Option<(u64, PathBuf, u64)>,
+    /// A save waiting on the formatter, and when it started waiting. Saved
+    /// unformatted if the server has not answered by [`FORMAT_PATIENCE`].
+    format_then_save: Option<(PaneId, Instant)>,
     /// The directory kubide was opened on. Explorers root here rather than at
     /// the process's current directory, which drifts once anything chdirs.
     root: PathBuf,
@@ -277,6 +291,9 @@ enum Pending {
     ProjectSearch,
     /// The name for a theme about to be written.
     NewTheme,
+    /// A completion list is open, carrying how many characters of the word
+    /// were already typed — what the chosen text replaces.
+    Completion(usize),
     /// Replace, step one: what to look for.
     ReplaceWhat,
     /// Replace, step two, carrying step one's answer.
@@ -323,6 +340,37 @@ fn rewrite_files(needle: &str, with: &str, files: &[PathBuf], keep: &[PathBuf]) 
     }
     (changed, skipped, failed)
 }
+
+/// Applies a formatter's edits as one undo step.
+///
+/// From the bottom of the file up: every edit is positioned against the
+/// text as it was sent, and applying one moves everything after it, so
+/// going backwards is what keeps the rest of the positions true.
+fn apply_text_edits(buffer: &mut kb_edit::Buffer, mut edits: Vec<kb_lsp::TextEdit>) {
+    if edits.is_empty() {
+        return;
+    }
+    edits.sort_by_key(|e| std::cmp::Reverse((e.start, e.end)));
+    let caret = buffer.cursor;
+    buffer.begin_undo_group();
+    for e in edits {
+        buffer.edit(
+            kb_edit::Pos::new(e.start.line, e.start.col),
+            kb_edit::Pos::new(e.end.line, e.end.col),
+            &e.text,
+        );
+    }
+    buffer.end_undo_group();
+    // Formatting is not a jump: the caret stays on its line, as near its
+    // column as the reformatted line allows.
+    let line = caret.line.min(buffer.len().saturating_sub(1));
+    buffer.move_to(kb_edit::Pos::new(line, caret.col.min(buffer.line_len(line))), false);
+}
+
+/// How long a save waits for the formatter before going ahead without it.
+/// Long enough for rustfmt on a large file, short enough that a wedged
+/// server never costs anyone the save.
+const FORMAT_PATIENCE: Duration = Duration::from_millis(1500);
 
 /// The answers to "what about the unsaved work", in the order they are listed.
 ///
@@ -444,6 +492,10 @@ impl Kubide {
             git_at: Instant::now(),
             git_gen: 0,
             recent: Vec::new(),
+            lsp: lsp::Servers::new(&workspace.dir),
+            hover: None,
+            lsp_asked: None,
+            format_then_save: None,
             root: workspace.dir.clone(),
             syntax: Rc::new(kb_syn::Syntax::new()),
             snippets: kb_cfg::snippets::load(),
@@ -2041,6 +2093,170 @@ impl Kubide {
         self.focus = pane;
     }
 
+    /// Keeps the language servers in step with the editors on screen and
+    /// takes in whatever they have said since the last tick.
+    fn lsp_tick(&mut self) -> bool {
+        let mut open = Vec::new();
+        for c in self.content.values() {
+            let Content::Editor(e) = c else { continue };
+            let (Some(lang), Some(path)) = (e.lang(), e.buffer.path()) else { continue };
+            self.lsp.sync(&self.cfg.lsp, lang, path, e.buffer.revision(), || e.buffer.to_text());
+            // Servers that check on save — rust-analyzer runs cargo then —
+            // hear about it here, whichever of the save paths it came by.
+            self.lsp.note_modified(lang, path, e.buffer.modified());
+            open.push(path.to_path_buf());
+        }
+        self.lsp.close_except(&open);
+
+        let (answers, mut changed) = self.lsp.poll();
+        for note in std::mem::take(&mut self.lsp.notes) {
+            self.warn(&note);
+        }
+        for answer in answers {
+            self.lsp_answer(answer);
+        }
+        // The formatter has had its chance; the save goes ahead without it.
+        if let Some((pane, since)) = self.format_then_save {
+            if since.elapsed() >= FORMAT_PATIENCE {
+                self.format_then_save = None;
+                if let Some(Content::Editor(e)) = self.content.get_mut(&pane) {
+                    e.save();
+                }
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// Asks the formatter about the focused file. False when there is no
+    /// server to ask, so the caller can get on with it.
+    fn lsp_request_format(&mut self) -> bool {
+        let Some(Content::Editor(e)) = self.content.get(&self.focus) else { return false };
+        let (Some(lang), Some(path)) = (e.lang(), e.buffer.path().map(Path::to_path_buf)) else {
+            return false;
+        };
+        let revision = e.buffer.revision();
+        self.lsp.sync(&self.cfg.lsp, lang, &path, revision, || e.buffer.to_text());
+        let Some(client) = self.lsp.client(lang).filter(|c| c.is_ready()) else { return false };
+        let id = client.format(&path, 4);
+        self.lsp_asked = Some((id, path, revision));
+        true
+    }
+
+    /// Puts one of the four questions to the focused file's server.
+    fn lsp_ask(&mut self, action: kb_cfg::Action) {
+        if action == kb_cfg::Action::Format {
+            if !self.lsp_request_format() {
+                self.warn("no language server is running for this file");
+            }
+            return;
+        }
+        let Some(Content::Editor(e)) = self.content.get(&self.focus) else { return };
+        let (Some(lang), Some(path)) = (e.lang(), e.buffer.path().map(Path::to_path_buf)) else {
+            self.warn("no language server for this kind of file");
+            return;
+        };
+        let (revision, at) = (e.buffer.revision(), lsp::pos(e.buffer.cursor));
+        // The question is about the text on screen, so the server hears that
+        // text first — the tick may not have carried the last keystroke yet.
+        self.lsp.sync(&self.cfg.lsp, lang, &path, revision, || e.buffer.to_text());
+        let Some(client) = self.lsp.client(lang) else {
+            self.warn("no language server is running for this file");
+            return;
+        };
+        if !client.is_ready() {
+            self.warn("the language server is still starting");
+            return;
+        }
+        let id = match action {
+            kb_cfg::Action::GoToDefinition => client.definition(&path, at),
+            kb_cfg::Action::Hover => client.hover(&path, at),
+            _ => client.completion(&path, at),
+        };
+        self.lsp_asked = Some((id, path, revision));
+    }
+
+    /// Acts on a server's answer — if it is still an answer to the question.
+    /// One about a file that has been edited since is describing text that
+    /// is gone, and applying it would put edits in the wrong places.
+    fn lsp_answer(&mut self, answer: kb_lsp::Event) {
+        use kb_lsp::Event;
+        let id = match &answer {
+            Event::Definition { id, .. }
+            | Event::Hover { id, .. }
+            | Event::Formatting { id, .. }
+            | Event::Completions { id, .. }
+            | Event::Failed { id, .. } => *id,
+            Event::Message(text) => {
+                self.warn(text);
+                return;
+            }
+            _ => return,
+        };
+        let Some((asked, path, revision)) = self.lsp_asked.clone() else { return };
+        if asked != id {
+            return;
+        }
+        self.lsp_asked = None;
+        let pane = self.focus;
+        let current = match self.content.get(&pane) {
+            Some(Content::Editor(e)) if e.buffer.path() == Some(path.as_path()) => {
+                e.buffer.revision() == revision
+            }
+            _ => false,
+        };
+        if !current {
+            return;
+        }
+        match answer {
+            Event::Definition { at: Some((to, pos)), .. } => {
+                self.open_at(to, kb_edit::Pos::new(pos.line, pos.col));
+            }
+            Event::Definition { at: None, .. } => self.warn("no definition found"),
+            Event::Hover { text: Some(text), .. } => self.hover = Some((pane, text)),
+            Event::Hover { text: None, .. } => self.warn("nothing to say about this"),
+            Event::Formatting { edits, .. } => {
+                let save = self.format_then_save.take().is_some_and(|(p, _)| p == pane);
+                if let Some(Content::Editor(e)) = self.content.get_mut(&pane) {
+                    apply_text_edits(&mut e.buffer, edits);
+                    if save {
+                        e.save();
+                    }
+                }
+            }
+            Event::Completions { items, .. } => {
+                if items.is_empty() {
+                    self.warn("no completions here");
+                    return;
+                }
+                let typed = match self.content.get(&pane) {
+                    Some(Content::Editor(e)) => e.buffer.word_before_cursor(),
+                    _ => String::new(),
+                };
+                let rows = items
+                    .into_iter()
+                    .map(|c| {
+                        let detail = match (c.kind, c.detail) {
+                            (Some(k), Some(d)) => format!("{k}  {d}"),
+                            (Some(k), None) => k.to_string(),
+                            (None, Some(d)) => d,
+                            (None, None) => String::new(),
+                        };
+                        (c.label, detail, c.insert)
+                    })
+                    .collect();
+                self.pending = Some(Pending::Completion(typed.chars().count()));
+                self.palette = Some(Palette::pick("complete", rows, &typed));
+            }
+            // "Content modified" is the server saying what the revision
+            // check above says; anything else is worth a line.
+            Event::Failed { message, .. } if !message.to_lowercase().contains("modified") => {
+                self.warn(&message);
+            }
+            _ => {}
+        }
+    }
+
     /// Writes the colours on screen out as a theme, switches to it and opens
     /// the file, so the first save already shows in the window around it.
     fn create_theme(&mut self, name: &str) {
@@ -2207,6 +2423,10 @@ impl Kubide {
         // or the next tick would immediately run a second status.
         self.git = kb_git::Git::discover(&self.root);
         self.git_at = Instant::now();
+        // The servers were started on the old root and index that project;
+        // dropping them shuts them down, and the next file starts new ones.
+        self.lsp = lsp::Servers::new(&self.root);
+        self.lsp_asked = None;
         // From here the layout is remembered against the new workspace, and
         // the layout it had remembered before is overwritten rather than
         // restored. Deliberate: Backspace is a navigation key, not "open
@@ -2377,6 +2597,15 @@ impl Kubide {
             }
             Pending::NewTheme => {
                 self.create_theme(&answer);
+                return;
+            }
+            Pending::Completion(typed) => {
+                if let Some(Content::Editor(e)) = self.content.get_mut(&self.focus) {
+                    // The word being completed is replaced, not added to.
+                    let end = e.buffer.cursor;
+                    let start = kb_edit::Pos::new(end.line, end.col.saturating_sub(typed));
+                    e.buffer.edit(start, end, &answer);
+                }
                 return;
             }
             Pending::ReplaceWhat => {
@@ -3354,6 +3583,7 @@ impl Handler for Kubide {
             // next time they draw — lazily, so hidden panes never pay.
             self.git_gen += 1;
         }
+        let lsp_changed = self.lsp_tick();
         // Cheap enough to do every tick: one path comparison, almost always
         // equal. Watching from here is what lets Ctrl+Tab count a focus
         // change as "I was in that file" without hooks on every open.
@@ -3444,6 +3674,7 @@ impl Handler for Kubide {
         self.blink_last = blink;
 
         dirty || git_changed || ticking || remote_done || tree_changed || blinked || agent_changed
+            || lsp_changed
     }
 
     fn on_mouse_move(&mut self, x: f32, y: f32) -> bool {
@@ -3684,6 +3915,7 @@ impl Handler for Kubide {
     }
 
     fn on_key(&mut self, vk: u8, mods: Mods) -> bool {
+        self.hover = None;
         // The overlays take every key while one is open. Anything less lets
         // a stray keystroke through to the editor underneath, which is how a
         // find box ends up typing into the file it was searching.
@@ -3941,6 +4173,7 @@ impl Kubide {
                 self.pending = Some(Pending::ProjectSearch);
                 self.palette = Some(Palette::prompt("search", ""));
             }
+            GoToDefinition | Hover | Format | Complete => self.lsp_ask(action),
             NewTheme => {
                 self.pending = Some(Pending::NewTheme);
                 self.palette = Some(Palette::prompt("new theme name", ""));
@@ -4071,6 +4304,13 @@ impl Kubide {
                 if stale && pending != Some(Confirm::Overwrite(self.focus)) {
                     self.confirm = Some(Confirm::Overwrite(self.focus));
                     self.warn("changed on disk since you opened it — press save again to overwrite");
+                    return true;
+                }
+                // With format-on-save the formatter goes first and the save
+                // follows its answer; without a server, or without patience
+                // left, the file is saved as it stands.
+                if self.cfg.lsp.format_on_save && self.lsp_request_format() {
+                    self.format_then_save = Some((self.focus, Instant::now()));
                     return true;
                 }
                 if let Some(Content::Editor(e)) = self.content.get_mut(&self.focus) {

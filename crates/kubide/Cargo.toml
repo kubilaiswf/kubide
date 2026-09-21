@@ -6,6 +6,7 @@ rust-version.workspace = true
 
 [dependencies]
 kb-agent = { path = "../kb-agent" }
+kb-lsp = { path = "../kb-lsp" }
 kb-cfg = { path = "../kb-cfg" }
 kb-edit = { path = "../kb-edit" }
 kb-find = { path = "../kb-find" }

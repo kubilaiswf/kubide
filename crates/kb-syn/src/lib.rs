@@ -199,6 +199,17 @@ impl Lang {
         })
     }
 
+    /// What the language server protocol calls this language — the key a
+    /// server is looked up by in `[lsp] servers`. Its list, not ours: TSX is
+    /// `typescriptreact` there and a shell script is `shellscript`.
+    pub fn language_id(self) -> &'static str {
+        match self {
+            Lang::Tsx => "typescriptreact",
+            Lang::Bash => "shellscript",
+            other => other.name(),
+        }
+    }
+
     /// The canonical name, which is also the key an injection resolves: a
     /// markdown fence saying ```rust and an HTML `<script>` both reach their
     /// grammar through this string.

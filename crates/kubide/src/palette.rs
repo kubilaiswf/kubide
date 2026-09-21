@@ -235,6 +235,37 @@ impl Palette {
         me
     }
 
+    /// A list to pick one text from — completions, where the row is what is
+    /// offered, the detail is its type, and the target is what gets typed.
+    /// Seeded with what is already typed, so the list opens narrowed to it
+    /// and more typing narrows it further.
+    pub fn pick(label: &str, rows: Vec<(String, String, String)>, typed: &str) -> Self {
+        let mut items = Vec::with_capacity(rows.len());
+        let mut details = Vec::with_capacity(rows.len());
+        let mut targets = Vec::with_capacity(rows.len());
+        for (item, detail, text) in rows {
+            items.push(item);
+            details.push(detail);
+            targets.push(Target::Text(text));
+        }
+        let mut me = Self {
+            mode: Mode::Command,
+            label: Some(label.to_string()),
+            question: None,
+            query: typed.to_string(),
+            selected: 0,
+            top: 0,
+            items,
+            details,
+            targets,
+            matches: Vec::new(),
+            lines: Vec::new(),
+            note: None,
+        };
+        me.refilter();
+        me
+    }
+
     /// A question with a fixed set of answers, listed in order.
     ///
     /// The wording is the interface: "Close without saving" says what will

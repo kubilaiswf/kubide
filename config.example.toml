@@ -164,6 +164,26 @@ smartcase = false
 # than vim's, because the highlight is the only way to see what n will do.
 hlsearch = true
 
+# Language servers: errors as you type, go to definition, hover, completion
+# and formatting, from each language's own server. One that is not installed
+# is just not started. The name is the protocol's language id, the value the
+# command line. Only read from this file, never from a project's .kubide —
+# a clone must not get to pick a program to run.
+[lsp]
+enabled = true
+# Run the server's formatter every time a file is saved.
+format_on_save = false
+
+[lsp.servers]
+c = ["clangd"]
+cpp = ["clangd"]
+go = ["gopls"]
+javascript = ["typescript-language-server", "--stdio"]
+python = ["pyright-langserver", "--stdio"]
+rust = ["rust-analyzer"]
+typescript = ["typescript-language-server", "--stdio"]
+typescriptreact = ["typescript-language-server", "--stdio"]
+
 # The agent pane: Claude Code, driven inside a pane. It is the `claude` CLI
 # itself — install and log in to that first — so CLAUDE.md, skills, MCP
 # servers and hooks all apply exactly as they do in the terminal.
@@ -248,7 +268,7 @@ auto_advance = false
 # cut, save, undo, redo, select-all, select-line, go-to-bracket, commands, go-to-file, last-file, recent-files, find, replace, replace-in-project, go-to-line,
 # find-in-project, toggle-comment, move-line-up, move-line-down, duplicate-line, delete-line, font-larger,
 # pomodoro-toggle, pomodoro-reset, pomodoro-skip, font-larger, font-smaller,
-# toggle-vim, new-theme, edit-theme, quit.
+# toggle-vim, new-theme, edit-theme, go-to-definition, hover, format, complete, quit.
 #
 # Note on layouts: letters and digits have the same virtual-key code on every
 # keyboard layout, the OEM keys do not. That's why split is bound to Ctrl+2/3

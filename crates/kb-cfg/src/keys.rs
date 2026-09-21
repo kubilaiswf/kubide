@@ -89,6 +89,12 @@ pub enum Action {
     /// list" from the list is a joke, not a feature.
     Commands,
     GoToFile,
+    /// Asked of the language server. Each says so when the file's language
+    /// has none running, rather than silently doing nothing.
+    GoToDefinition,
+    Hover,
+    Format,
+    Complete,
     /// Swaps the focused pane back to the file it held most recently — the
     /// alt-tab of files. The editor has no tabs on purpose, and this is the
     /// piece of tabs actually worth having.
@@ -193,6 +199,10 @@ impl Action {
         Action::SelectLine,
         Action::GoToBracket,
         Action::GoToFile,
+        Action::GoToDefinition,
+        Action::Hover,
+        Action::Format,
+        Action::Complete,
         Action::LastFile,
         Action::RecentFiles,
         Action::Find,
@@ -267,6 +277,10 @@ impl Action {
             GoToBracket => "Go to matching bracket",
             Commands => "Show all commands",
             GoToFile => "Go to file",
+            GoToDefinition => "Go to definition",
+            Hover => "Show type and documentation",
+            Format => "Format the file",
+            Complete => "Complete the word",
             LastFile => "Switch to last file",
             RecentFiles => "Switch between recent files",
             Find => "Find in file",
@@ -665,6 +679,10 @@ impl Default for Keymap {
             ("ctrl+minus", FontSmaller),
             ("ctrl+numpadminus", FontSmaller),
             ("ctrl+p", GoToFile),
+            ("f12", GoToDefinition),
+            ("ctrl+k", Hover),
+            ("alt+shift+f", Format),
+            ("ctrl+space", Complete),
             ("ctrl+shift+p", Commands),
             // The oldest "open" there is. A shell's Ctrl+O is obscure enough
             // to lose — Ctrl+W already set that precedent for close.

@@ -122,6 +122,15 @@ fn syntax_style(c: &kb_cfg::SyntaxStyles, k: kb_syn::Kind) -> kb_text::FontStyle
     kb_text::FontStyle { bold: s.bold, italic: s.italic }
 }
 
+fn severity_color(theme: &kb_cfg::Theme, s: kb_lsp::Severity) -> kb_cfg::Color {
+    match s {
+        kb_lsp::Severity::Error => theme.error,
+        kb_lsp::Severity::Warning => theme.warning,
+        kb_lsp::Severity::Info => theme.accent,
+        kb_lsp::Severity::Hint => theme.dim,
+    }
+}
+
 fn git_color(c: &kb_cfg::GitColors, s: kb_git::Status) -> kb_cfg::Color {
     match s {
         kb_git::Status::Modified => c.modified,
@@ -158,6 +167,10 @@ const CHEAT_SHEET: &[Cheat] = &[
     (kb_cfg::Action::ReplaceInProject, "", "Replace in project"),
     (kb_cfg::Action::FindInProject, "", "Find in project"),
     (kb_cfg::Action::GoToLine, "", "Go to line"),
+    (kb_cfg::Action::GoToDefinition, "", "Go to definition"),
+    (kb_cfg::Action::Hover, "", "Type and docs"),
+    (kb_cfg::Action::Complete, "", "Complete"),
+    (kb_cfg::Action::Format, "", "Format"),
     (kb_cfg::Action::GitPanel, "", "Git panel"),
     (kb_cfg::Action::OpenAgent, "", "Claude agent"),
     (kb_cfg::Action::Save, "", "Save"),
@@ -713,6 +726,24 @@ impl Kubide {
             )
         };
 
+        // What the language server has to say about the lines on screen.
+        let complaints: Vec<kb_lsp::Diagnostic> = match self.content.get(&pane) {
+            Some(Content::Editor(e)) => e
+                .buffer
+                .path()
+                .map(|p| {
+                    self.lsp
+                        .diagnostics(p)
+                        .iter()
+                        .filter(|d| d.end.line >= top && d.start.line < top + visible)
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        let hover = self.hover.as_ref().filter(|(p, _)| *p == pane).map(|(_, t)| t.clone());
+
         let theme = self.cfg.theme;
         // Recomputed with the scrolled `top`: ensure_visible may have moved it.
         let area = TextArea::new(r, lh, cw, top);
@@ -733,10 +764,35 @@ impl Kubide {
             &dim,
         );
 
-        if let Some(s) = &status {
-            let brush = dc.solid(themed(if s.starts_with("save failed") { theme.error } else { theme.accent }, 0.9))?;
+        // The complaint about the caret's line, when nothing more urgent is
+        // using the space: reading the message should not take a mouse.
+        let complaint = crate::lsp::worst_on_line(&complaints, cursor.line).filter(|_| focused);
+        let status = match (&status, complaint) {
+            (Some(s), _) => Some((s.clone(), if s.starts_with("save failed") { theme.error } else { theme.accent })),
+            (None, Some(d)) => {
+                let first = d.message.lines().next().unwrap_or_default();
+                let text = match &d.source {
+                    Some(source) => format!("{source}: {first}"),
+                    None => first.to_string(),
+                };
+                Some((text, severity_color(&theme, d.severity)))
+            }
+            (None, None) => None,
+        };
+        if let Some((s, color)) = &status {
+            let brush = dc.solid(themed(*color, 0.9))?;
             // Measured, not guessed: a fixed offset clips the message
             // mid-word as soon as it is longer than the guess.
+            // Beside the header, never over it: a long compiler message is
+            // cut with an ellipsis rather than drawn across the file name.
+            let room = r.right() - INSET - (r.x + 10.0 + self.text.width_of(&header) + 3.0 * cw);
+            let fits = (room / cw).floor().max(0.0) as usize;
+            let shown: String = if s.chars().count() > fits && fits > 1 {
+                s.chars().take(fits - 1).chain(std::iter::once('\u{2026}')).collect()
+            } else {
+                s.clone()
+            };
+            let s = &shown;
             let x = (r.right() - INSET - self.text.width_of(s)).max(r.x + INSET);
             let layout = self.text.volatile(s)?;
             dc.text(
@@ -976,6 +1032,59 @@ impl Kubide {
                         &fg,
                     );
                 }
+            }
+        }
+
+        // Complaints, under the text they are about. A plain rule rather
+        // than a squiggle: at one and a half pixels a wave is a smudge.
+        for d in &complaints {
+            let brush = dc.solid(themed(severity_color(&theme, d.severity), if focused { 0.9 } else { 0.5 }))?;
+            for (i, line) in lines.iter().enumerate() {
+                let len = line.chars().count();
+                let Some((from, to)) = crate::lsp::span_on_line(d, top + i, len) else { continue };
+                if to <= left {
+                    continue;
+                }
+                let y = y0 + i as f32 * lh + lh - 2.0;
+                let x0 = text_x + from.saturating_sub(left) as f32 * cw;
+                let x1 = text_x + (to - left) as f32 * cw;
+                dc.fill_rect(&Bounds { left: x0, top: y, right: x1, bottom: y + 1.5 }, &brush);
+            }
+        }
+
+        // What the server said about the thing under the caret, in a box
+        // below it — or above, when below would run off the pane.
+        if let Some(text) = hover.filter(|_| cursor.line >= top && cursor.line < top + visible) {
+            let max_cols = (((r.right() - text_x) / cw) as usize).saturating_sub(4).max(20);
+            let rows: Vec<String> = text
+                .lines()
+                .take(12)
+                .map(|l| {
+                    if l.chars().count() > max_cols {
+                        l.chars().take(max_cols - 1).chain(std::iter::once('\u{2026}')).collect()
+                    } else {
+                        l.to_string()
+                    }
+                })
+                .collect();
+            let widest = rows.iter().map(|l| l.chars().count()).max().unwrap_or(0) as f32 * cw;
+            let (w, h) = (widest + 2.0 * cw, rows.len() as f32 * lh + 0.6 * lh);
+            let caret_y = y0 + (cursor.line - top) as f32 * lh;
+            let below = caret_y + lh + 2.0;
+            let y = if below + h <= r.bottom() { below } else { (caret_y - h - 2.0).max(r.y) };
+            let x = (text_x + cursor.col.saturating_sub(left) as f32 * cw).min(r.right() - w - 4.0).max(r.x + 4.0);
+            let shape = RoundedRect {
+                rect: Bounds { left: x, top: y, right: x + w, bottom: y + h },
+                radius_x: 5.0,
+                radius_y: 5.0,
+            };
+            let panel = dc.solid(overlay(theme.overlay))?;
+            let edge = dc.solid(themed(theme.accent, 0.45))?;
+            dc.fill_rounded(&shape, &panel);
+            dc.stroke_rounded(&shape, &edge, 1.0);
+            for (i, row) in rows.iter().enumerate() {
+                let layout = self.text.volatile(row)?;
+                dc.text(Point { x: x + cw, y: y + 0.3 * lh + i as f32 * lh }, &layout, &fg);
             }
         }
         dc.pop_clip();
@@ -2980,6 +3089,13 @@ impl Kubide {
                 let sel = selected.map(|s| format!("  ({} selected)", s.chars().count())).unwrap_or_default();
                 parts.push(format!("Ln {}, Col {}{sel}", c.line + 1, c.col + 1));
             }
+        }
+        // Only when there is something to count: a permanent "0 errors"
+        // is a segment that says nothing on most days.
+        let (errors, warnings) = self.lsp.counts();
+        if errors + warnings > 0 {
+            let count = |n: usize, word: &str| format!("{n} {word}{}", if n == 1 { "" } else { "s" });
+            parts.push(format!("{}, {}", count(errors, "error"), count(warnings, "warning")));
         }
         if on.font {
             parts.push(format!("{} {:.0}px", self.text.family(), self.text.size()));

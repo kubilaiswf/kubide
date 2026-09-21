@@ -297,6 +297,10 @@ impl Editor {
         self.highlighted_at = Some(self.buffer.revision());
     }
 
+    pub fn lang(&self) -> Option<kb_syn::Lang> {
+        self.lang
+    }
+
     /// Spans for one line, empty when there is no highlighting for it.
     pub fn spans(&self, line: usize) -> &[kb_syn::Span] {
         self.highlights.get(line).map(Vec::as_slice).unwrap_or(&[])
