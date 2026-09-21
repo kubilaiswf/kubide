@@ -275,6 +275,8 @@ enum Pending {
     NewFolder(PathBuf),
     Rename(PathBuf),
     ProjectSearch,
+    /// The name for a theme about to be written.
+    NewTheme,
     /// Replace, step one: what to look for.
     ReplaceWhat,
     /// Replace, step two, carrying step one's answer.
@@ -2039,6 +2041,28 @@ impl Kubide {
         self.focus = pane;
     }
 
+    /// Writes the colours on screen out as a theme, switches to it and opens
+    /// the file, so the first save already shows in the window around it.
+    fn create_theme(&mut self, name: &str) {
+        let from = self.cfg.theme_name.clone().unwrap_or_else(|| "default".into());
+        let path = match kb_cfg::write_theme(name, &self.cfg.theme, &from) {
+            Ok(path) => path,
+            Err(e) => {
+                self.warn(&e);
+                return;
+            }
+        };
+        self.cfg.theme_name = Some(name.trim().to_string());
+        let config = kb_cfg::config_path();
+        if let Err(e) = kb_cfg::save_named(&self.cfg, self.cfg.theme_name.as_deref(), &config) {
+            self.warn(&format!("config: {e}"));
+        }
+        // Re-aims the theme watcher at the new file.
+        self.reload_config();
+        let target = self.workspace_pane();
+        self.open_over(target, path);
+    }
+
     /// Counts what a project replace would touch and asks before doing it.
     ///
     /// The files come from the same `git grep` the project search runs, so
@@ -2349,6 +2373,10 @@ impl Kubide {
                 const LIMIT: usize = 500;
                 let hits = self.git.grep(&answer, LIMIT).unwrap_or_default();
                 self.palette = Some(Palette::results(hits, &self.root));
+                return;
+            }
+            Pending::NewTheme => {
+                self.create_theme(&answer);
                 return;
             }
             Pending::ReplaceWhat => {
@@ -3913,6 +3941,25 @@ impl Kubide {
                 self.pending = Some(Pending::ProjectSearch);
                 self.palette = Some(Palette::prompt("search", ""));
             }
+            NewTheme => {
+                self.pending = Some(Pending::NewTheme);
+                self.palette = Some(Palette::prompt("new theme name", ""));
+            }
+            EditTheme => match self.cfg.theme_name.clone() {
+                Some(name) => match kb_cfg::theme_file(&name) {
+                    Some(path) => {
+                        let target = self.workspace_pane();
+                        self.open_over(target, path);
+                    }
+                    None => self.warn(&format!("theme '{name}' has no file to open")),
+                },
+                // The default look and an inline [theme] table have no file
+                // of their own; making one is the way to start editing.
+                None => {
+                    self.pending = Some(Pending::NewTheme);
+                    self.palette = Some(Palette::prompt("no theme file yet \u{b7} name one", ""));
+                }
+            },
             ReplaceInProject => {
                 if !self.git.is_repo() {
                     self.warn("project replace needs a git repository");

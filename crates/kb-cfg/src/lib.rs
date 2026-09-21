@@ -874,6 +874,56 @@ pub(crate) fn resolve_theme_in(dir: &Path, name: &str) -> Result<(Theme, Option<
     ))
 }
 
+/// Writes `theme` out as a new file in `dir` and returns where.
+///
+/// Every colour is written, not only what differs from the default: this
+/// file exists to be edited, and a role that is not in it is a role nobody
+/// finds. Refuses an existing name rather than overwrite someone's theme.
+pub fn write_theme_in(dir: &Path, name: &str, theme: &Theme, from: &str) -> Result<PathBuf, String> {
+    let name = name.trim();
+    let plain = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
+    if name.is_empty() || !name.chars().all(plain) {
+        return Err("a theme name is letters, digits, - and _".into());
+    }
+    if name == "default" {
+        return Err("'default' is the built-in look; pick another name".into());
+    }
+    let path = dir.join(format!("{name}.toml"));
+    if path.exists() || BUILTIN_THEMES.iter().any(|(n, _)| *n == name) {
+        return Err(format!("a theme called '{name}' already exists"));
+    }
+    let body = toml::to_string_pretty(theme).map_err(|e| e.to_string())?;
+    let text = format!(
+        "# {name} for kubide, started from {from}.\n#\n\
+         # Saved changes show at once while this theme is the active one.\n\
+         # Colours are \"#rrggbb\", or \"#rrggbbaa\" with transparency. Left out of\n\
+         # a fresh copy because they are unset: `background` at the top (the\n\
+         # window's own colour), and under [editor] `selection`, `current_line`,\n\
+         # `line_number`, `line_number_active`, `caret`, `search`, `bracket`.\n\
+         # [style] takes \"bold\", \"italic\", \"bold italic\" or \"normal\" per role.\n\n{body}"
+    );
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    std::fs::write(&path, text).map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
+/// [`write_theme_in`] the themes folder.
+pub fn write_theme(name: &str, theme: &Theme, from: &str) -> Result<PathBuf, String> {
+    write_theme_in(&themes_dir(), name, theme, from)
+}
+
+/// The file behind a named theme, written out from the built-in first when
+/// the folder has lost it — there is nothing to edit otherwise.
+pub fn theme_file(name: &str) -> Option<PathBuf> {
+    let path = themes_dir().join(format!("{name}.toml"));
+    if !path.exists() {
+        let (_, text) = BUILTIN_THEMES.iter().find(|(n, _)| *n == name)?;
+        std::fs::create_dir_all(themes_dir()).ok()?;
+        std::fs::write(&path, text).ok()?;
+    }
+    Some(path)
+}
+
 // ---------------------------------------------------------------------------
 // Reload
 
@@ -1217,7 +1267,22 @@ mod tests {
 
 #[cfg(test)]
 mod seed_tests {
-    use super::is_older_seed;
+    use super::{is_older_seed, resolve_theme_in, write_theme_in, Color, Theme};
+
+    #[test]
+    fn a_written_theme_reads_back_the_same() {
+        let dir = std::env::temp_dir().join("kubide-write-theme");
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut theme = Theme { background: Some(Color::rgb(0x1f, 0x18, 0x13)), ..Theme::default() };
+        theme.style.keyword.bold = true;
+
+        let path = write_theme_in(&dir, "mine", &theme, "default").unwrap();
+        assert_eq!(resolve_theme_in(&dir, "mine").unwrap(), (theme, Some(path)));
+        // Never over an existing theme, the user's or a built-in.
+        assert!(write_theme_in(&dir, "mine", &theme, "default").is_err());
+        assert!(write_theme_in(&dir, "gruvbox", &theme, "default").is_err());
+        assert!(write_theme_in(&dir, "../up", &theme, "default").is_err());
+    }
 
     #[test]
     fn a_seed_missing_newer_lines_is_still_ours() {

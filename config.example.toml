@@ -248,7 +248,7 @@ auto_advance = false
 # cut, save, undo, redo, select-all, select-line, go-to-bracket, commands, go-to-file, last-file, recent-files, find, replace, replace-in-project, go-to-line,
 # find-in-project, toggle-comment, move-line-up, move-line-down, duplicate-line, delete-line, font-larger,
 # pomodoro-toggle, pomodoro-reset, pomodoro-skip, font-larger, font-smaller,
-# toggle-vim, quit.
+# toggle-vim, new-theme, edit-theme, quit.
 #
 # Note on layouts: letters and digits have the same virtual-key code on every
 # keyboard layout, the OEM keys do not. That's why split is bound to Ctrl+2/3

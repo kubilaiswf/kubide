@@ -28,6 +28,12 @@ pub enum Action {
     OpenExplorer,
     ToggleExplorer,
     OpenSettings,
+    /// Copies the colours on screen into a new theme file, makes it the
+    /// active theme and opens it — the file is watched, so every save
+    /// recolours the window it is being edited in.
+    NewTheme,
+    /// Opens the active theme's file.
+    EditTheme,
     ToggleHelp,
     NewFile,
     NewFolder,
@@ -151,6 +157,8 @@ impl Action {
         Action::OpenExplorer,
         Action::ToggleExplorer,
         Action::OpenSettings,
+        Action::NewTheme,
+        Action::EditTheme,
         Action::ToggleHelp,
         Action::NewFile,
         Action::NewFolder,
@@ -222,6 +230,8 @@ impl Action {
             OpenExplorer => "Open file tree",
             ToggleExplorer => "Toggle file tree",
             OpenSettings => "Settings",
+            NewTheme => "New theme from the current colours",
+            EditTheme => "Edit the current theme",
             ToggleHelp => "Shortcut list on or off",
             NewFile => "New file",
             NewFolder => "New folder",
