@@ -616,6 +616,17 @@ impl ApplicationHandler for App {
                 self.config.width.max(1) as u32,
                 self.config.height.max(1) as u32,
             ));
+        // The app id (Wayland) and WM_CLASS (X11). Without one the window is
+        // anonymous: no compositor rule can name it, no taskbar can match it
+        // to its .desktop entry, and it gets the generic icon.
+        {
+            use winit::platform::wayland::WindowAttributesExtWayland as _;
+            attrs = attrs.with_name("kubide", "kubide");
+        }
+        {
+            use winit::platform::x11::WindowAttributesExtX11 as _;
+            attrs = attrs.with_name("kubide", "kubide");
+        }
         if let Some(p) = place {
             attrs = attrs
                 .with_position(PhysicalPosition::new(p.x, p.y))

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=kubide
+GenericName=Code Editor
+Comment=A code editor written from scratch in Rust
+Exec=kubide %F
+Terminal=false
+Categories=Development;TextEditor;IDE;
+MimeType=text/plain;inode/directory;
+StartupWMClass=kubide
+Keywords=editor;code;rust;
