@@ -84,3 +84,22 @@ fn a_config_written_later_is_still_watched() {
         kb_cfg::Backdrop::Mica
     );
 }
+
+#[test]
+fn reading_the_config_is_not_a_change() {
+    // inotify reports a file being opened and closed, not just written, and
+    // the reload itself reads the file. Counting that as a change makes the
+    // reload trigger itself forever — and every lap throws away whatever the
+    // settings screen changed and had not written yet.
+    let dir = temp_dir("read");
+    let path = dir.join("config.toml");
+    std::fs::write(&path, "[font]\nsize = 14.0\n").unwrap();
+
+    let watcher = kb_cfg::Watcher::new(&path).expect("watcher should start");
+    std::thread::sleep(Duration::from_millis(300));
+    let _ = watcher.changed();
+
+    let _ = std::fs::read_to_string(&path).unwrap();
+    std::thread::sleep(Duration::from_millis(700));
+    assert!(!watcher.changed(), "a read was reported as a change");
+}
