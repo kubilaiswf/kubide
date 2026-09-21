@@ -41,6 +41,16 @@ const CHOICE_ROWS: usize = 9;
 
 /// The backdrop of an overlay: the theme's colour, never thinner than
 /// [`OVERLAY_FLOOR`]. A theme is free to ask for more.
+/// A theme's own colour for an editor mark when it names one, the mix the
+/// editor always used otherwise. A named colour keeps its alpha and only
+/// fades with focus, like everything else in an unfocused pane.
+fn mark(own: Option<kb_cfg::Color>, fallback: kb_cfg::Color, alpha: f32, focused: bool) -> Color {
+    match own {
+        Some(c) => themed(c, if focused { 1.0 } else { 0.55 }),
+        None => themed(fallback, alpha),
+    }
+}
+
 fn overlay(c: kb_cfg::Color) -> Color {
     let (r, g, b, a) = c.f32s();
     rgba(r, g, b, a.max(OVERLAY_FLOOR))
@@ -717,9 +727,23 @@ impl Kubide {
 
         dc.push_clip(&Bounds { left: r.x, top: r.y, right: r.right(), bottom: r.bottom() });
 
+        // The caret's line, under everything else that marks the text.
+        if let Some(c) = theme.editor.current_line {
+            if focused && cursor.line >= top && cursor.line < top + visible {
+                let y = y0 + (cursor.line - top) as f32 * lh;
+                let brush = dc.solid(themed(c, 1.0))?;
+                dc.fill_rect(&Bounds { left: r.x, top: y, right: r.right(), bottom: y + lh }, &brush);
+            }
+        }
+
         // Search matches, under the selection: what `n` will land on.
         if let Some(re) = &hl {
-            let brush = dc.solid(themed(theme.warning, if focused { 0.22 } else { 0.12 }))?;
+            let brush = dc.solid(mark(
+                theme.editor.search,
+                theme.warning,
+                if focused { 0.22 } else { 0.12 },
+                focused,
+            ))?;
             for (i, line) in lines.iter().enumerate() {
                 let chars: Vec<char> = line.chars().collect();
                 let y = y0 + i as f32 * lh;
@@ -744,7 +768,12 @@ impl Kubide {
         // Selection, per visible line. Columns are character counts, so
         // the x positions come from the cell width, not from measuring.
         if let Some((start, end)) = selection {
-            let brush = dc.solid(themed(theme.accent, if focused { 0.28 } else { 0.14 }))?;
+            let brush = dc.solid(mark(
+                theme.editor.selection,
+                theme.accent,
+                if focused { 0.28 } else { 0.14 },
+                focused,
+            ))?;
             for (i, line) in lines.iter().enumerate() {
                 let ln = top + i;
                 if ln < start.line || ln > end.line {
@@ -775,7 +804,7 @@ impl Kubide {
         // selection. Only while the pane is focused: the highlight
         // follows the caret, and the caret is not drawn either.
         if let Some(pair) = brackets.filter(|_| focused) {
-            let brush = dc.solid(themed(theme.accent, 0.30))?;
+            let brush = dc.solid(mark(theme.editor.bracket, theme.accent, 0.30, true))?;
             for p in [pair.0, pair.1] {
                 if p.line < top || p.line >= top + visible || p.col < left {
                     continue;
@@ -805,9 +834,15 @@ impl Kubide {
                     (Bounds { left: x, top: y + lh - 2.0, right: x + cw, bottom: y + lh }, 1.0)
                 }
             };
-            let brush = dc.solid(themed(theme.terminal.cursor, alpha))?;
+            let brush = dc.solid(themed(theme.editor.caret.unwrap_or(theme.terminal.cursor), alpha))?;
             dc.fill_rect(&rect, &brush);
         }
+
+        let number = dc.solid(mark(theme.editor.line_number, theme.dim, if focused { 1.0 } else { 0.5 }, focused))?;
+        let number_active = match theme.editor.line_number_active {
+            Some(c) => Some(dc.solid(themed(c, if focused { 1.0 } else { 0.55 }))?),
+            None => None,
+        };
 
         for (i, line) in lines.iter().enumerate() {
             let y = y0 + i as f32 * lh;
@@ -815,7 +850,10 @@ impl Kubide {
             dc.text(
                 Point { x: r.x + 10.0, y },
                 &num,
-                &dim,
+                match &number_active {
+                    Some(active) if top + i == cursor.line => active,
+                    _ => &number,
+                },
             );
 
             // What changed since the last commit: a thin bar in the strip

@@ -374,6 +374,17 @@ press = "#ffffff0d"
 close_hover = "#e64047d9"
 close_press = "#bf333ae6"
 
+# The editor's own marks. All optional: left out, each is mixed from accent,
+# dim and warning. A colour written here is used as is, alpha included.
+[theme.editor]
+# selection = "#8cb8f247"
+# current_line = "#ffffff0a"      # not drawn at all unless set
+# line_number = "#ada8a3"
+# line_number_active = "#edebe6"
+# caret = "#ccd9f2"
+# search = "#f2cc7338"
+# bracket = "#8cb8f24d"
+
 # Syntax roles. tree-sitter capture names fall back onto these, so
 # keyword.control.return still lands on "keyword".
 [theme.syntax]

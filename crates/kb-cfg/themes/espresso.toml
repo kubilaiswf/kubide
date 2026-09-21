@@ -53,6 +53,13 @@ deleted = "#ea6962"
 untracked = "#7daea3"
 conflicted = "#d3869b"
 
+[editor]
+selection = "#d8a65740"
+current_line = "#dfd0b80a"
+line_number = "#6b5c50"
+line_number_active = "#d8a657"
+search = "#e78a4e4d"
+
 [syntax]
 keyword = "#ea6962"
 function = "#89b482"

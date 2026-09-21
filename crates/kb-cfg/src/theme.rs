@@ -42,9 +42,31 @@ pub struct Theme {
     pub overlay: Color,
 
     pub caption: Caption,
+    pub editor: EditorColors,
     pub terminal: TerminalColors,
     pub git: GitColors,
     pub syntax: SyntaxColors,
+}
+
+/// The editor's own marks. Every one is optional: unset, each is mixed from
+/// `accent`, `dim` and `warning` exactly as before the table existed, so a
+/// theme of five colours still works. Set, the colour is used as written —
+/// its alpha included, which is what a highlight under text needs.
+#[derive(Clone, Copy, PartialEq, Debug, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct EditorColors {
+    pub selection: Option<Color>,
+    /// The line the caret is on. Not drawn at all unless set: a band across
+    /// the pane is a look, and nobody should get one by upgrading.
+    pub current_line: Option<Color>,
+    pub line_number: Option<Color>,
+    /// The caret's own line number.
+    pub line_number_active: Option<Color>,
+    pub caret: Option<Color>,
+    /// Search matches.
+    pub search: Option<Color>,
+    /// The bracket pair under the caret.
+    pub bracket: Option<Color>,
 }
 
 /// Syntax roles.
@@ -209,6 +231,7 @@ impl Default for Theme {
             divider: Color::rgb(0xff, 0xff, 0xff).with_alpha(0.10),
             overlay: Color::rgb(0x14, 0x14, 0x1c).with_alpha(0.95),
             caption: Caption::default(),
+            editor: EditorColors::default(),
             terminal: TerminalColors::default(),
             git: GitColors::default(),
             syntax: SyntaxColors::default(),

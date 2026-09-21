@@ -53,6 +53,17 @@ deleted = "#fb4934"
 untracked = "#83a598"
 conflicted = "#d3869b"
 
+# The editor's own marks. All optional: left out, each is mixed from accent,
+# dim and warning. A colour written here is used as is, alpha included.
+[editor]
+# selection = "#83a59847"
+# current_line = "#ebdbb20a"      # not drawn at all unless set
+# line_number = "#a89984"
+# line_number_active = "#ebdbb2"
+# caret = "#ebdbb2"
+# search = "#fabd2f38"
+# bracket = "#83a5984d"
+
 [syntax]
 keyword = "#fb4934"
 function = "#8ec07c"
