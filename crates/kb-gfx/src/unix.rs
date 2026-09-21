@@ -241,6 +241,7 @@ impl Canvas {
         let (x1, y1) = (clip.right.round() as i32, clip.bottom.round() as i32);
         let stride = inner.pixmap.width() as i32;
         let (tr, tg, tb, ta) = (b.0.red(), b.0.green(), b.0.blue(), b.0.alpha());
+        let curve = coverage_curve(0.2126 * tr + 0.7152 * tg + 0.0722 * tb);
         let pixels = inner.pixmap.pixels_mut();
 
         layout.for_each_image(at.x, at.y, |gx, gy, img| {
@@ -257,12 +258,12 @@ impl Canvas {
                     let i = (row * img.width as i32 + col) as usize;
                     let (r, g, bl, a) = match img.kind {
                         kb_text::GlyphKind::Mask => {
-                            (tr, tg, tb, ta * img.data[i] as f32 / 255.0)
+                            (tr, tg, tb, ta * curve[img.data[i] as usize])
                         }
                         kb_text::GlyphKind::Subpixel => {
                             let p = &img.data[i * 4..i * 4 + 3];
-                            let cov = (p[0] as f32 + p[1] as f32 + p[2] as f32) / (3.0 * 255.0);
-                            (tr, tg, tb, ta * cov)
+                            let cov = (p[0] as u16 + p[1] as u16 + p[2] as u16) / 3;
+                            (tr, tg, tb, ta * curve[cov as usize])
                         }
                         kb_text::GlyphKind::Color => {
                             let p = &img.data[i * 4..i * 4 + 4];
@@ -308,6 +309,28 @@ fn blend(dst: &mut PremultipliedColorU8, r: f32, g: f32, b: f32, a: f32) {
     if let Some(p) = PremultipliedColorU8::from_rgba(nr, ng, nb, na) {
         *dst = p;
     }
+}
+
+/// Glyph coverage, corrected for the colour it will be drawn in.
+///
+/// The pixmap holds sRGB values and `blend` mixes them as if they were
+/// light. For light text on a dark ground that under-fills every partly
+/// covered pixel, and the edges are most of a 14px glyph: the same font at
+/// the same size came out visibly thinner here than under DirectWrite, which
+/// corrects for exactly this with its gamma and grayscale contrast. Raising
+/// the coverage by the text's own luminance closes the gap — white text
+/// gets the full curve, dark text on a light theme is left almost alone,
+/// where the same mistake already errs on the heavy side.
+///
+/// 1.8 is DirectWrite's default gamma; the curve is rebuilt per call because
+/// 256 `powf`s are nothing next to blending a line of glyphs.
+fn coverage_curve(luminance: f32) -> [f32; 256] {
+    let gamma = 1.0 + 0.8 * luminance.clamp(0.0, 1.0);
+    let mut lut = [0.0f32; 256];
+    for (i, v) in lut.iter_mut().enumerate() {
+        *v = (i as f32 / 255.0).powf(1.0 / gamma);
+    }
+    lut
 }
 
 /// What the window is painted on before anything is drawn — the stand-in
